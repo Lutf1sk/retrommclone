@@ -1,0 +1,2 @@
+src/main.o: src/main.c lt/include/lt/io.h lt/include/lt/lt.h \
+ lt/include/lt/primitives.h lt/include/lt/fwd.h
