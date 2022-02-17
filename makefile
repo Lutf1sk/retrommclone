@@ -1,5 +1,5 @@
 
-OUT = onyxc
+OUT = retrommclone
 
 OBJS = \
 	src/main.o
