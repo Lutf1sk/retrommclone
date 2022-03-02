@@ -31,17 +31,49 @@ lt_window_t* win = NULL;
 lt_font_t* font = NULL;
 
 GLint icons[LT_GUI_ICON_MAX];
-
 GLint glyph_bm;
+
+typedef
+struct player {
+	lstr_t slug;
+	lstr_t username;
+	u8 direction;
+	int x, y;
+} player_t;
+
+#define MAX_PLAYERS 64
+
+player_t players[MAX_PLAYERS];
+u8 player_count = 0;
+
+char player_usernames[MAX_PLAYERS][18];
+char player_slugs[MAX_PLAYERS][21];
 
 void send_pong(lt_socket_t* sock) {
 	ws_send_text(sock, CLSTR("3"));
 }
 
+lt_spinlock_t state_lock = {0};
+
 void send_chat(lt_arena_t* arena, lt_socket_t* sock, lstr_t channel, lstr_t msg) {
 	char* buf = lt_arena_reserve(arena, 0);
 	usz len = lt_str_printf(buf, "42[\"message\",{\"channel\":\"%S\",\"contents\":\"%S\"}]", channel, msg);
 	ws_send_text(sock, LSTR(buf, len));
+}
+
+b8 lstr_startswith(lstr_t str, lstr_t substr) {
+	if (str.len < substr.len)
+		return 0;
+	return memcmp(str.str, substr.str, substr.len) == 0;
+}
+
+player_t* find_player_from_slug(lstr_t slug) {
+	for (usz i = 0; i < player_count; ++i)
+		if (lt_lstr_eq(slug, players[i].slug))
+			return &players[i];
+
+	LT_ASSERT_NOT_REACHED();
+	return NULL;
 }
 
 void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
@@ -50,6 +82,8 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		send_chat(arena, sock, CLSTR("global"), CLSTR("test"));
 	}
 	else if (lt_lstr_eq(it->str_val, CLSTR("update"))) {
+		lt_spinlock_lock(&state_lock);
+
 		static b8 printed = 0;
 
 		if (!printed) {
@@ -58,6 +92,24 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		}
 
 		lt_json_t* pieces = lt_json_find_child(it->next, CLSTR("pieces"));
+		lt_json_t* piece_it = pieces->child;
+		player_count = 0;
+		while (piece_it) {
+			if (lstr_startswith(piece_it->key, CLSTR("Player|"))) {
+				lstr_t slug = LSTR(piece_it->key.str + 7, piece_it->key.len - 7);
+				lstr_t username = lt_json_find_child(piece_it, CLSTR("username"))->str_val;
+
+				memcpy(player_slugs[player_count], slug.str, slug.len);
+				memcpy(player_usernames[player_count], username.str, username.len);
+
+				players[player_count].username = LSTR(player_usernames[player_count], username.len);
+				players[player_count].slug = LSTR(player_slugs[player_count], slug.len);
+
+				player_count++;
+			}
+			piece_it = piece_it->next;
+		}
+
 		lt_json_t* chats = lt_json_find_child(it->next, CLSTR("chats"));
 
 		lt_json_t* chat_it = chats->child;
@@ -79,6 +131,8 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 			chat_it = chat_it->next;
 		}
+
+		lt_spinlock_release(&state_lock);
 	}
 	else {
 		lt_werrf("Unknown or invalid message type '%S'\n", it->str_val);
@@ -415,6 +469,14 @@ int main(int argc, char** argv) {
 
 		lt_gui_panel_begin(cx, 0, 0, 0);
 		lt_gui_label(cx, CLSTR("RetroMMClone"), 0);
+
+		lt_gui_panel_begin(cx, 0, 0, 0);
+		lt_spinlock_lock(&state_lock);
+		for (usz i = 0; i < player_count; ++i)
+			lt_gui_label(cx, players[i].username, 0);
+		lt_spinlock_release(&state_lock);
+		lt_gui_panel_end(cx);
+
 		lt_gui_panel_end(cx);
 
 		lt_gui_end(cx);
