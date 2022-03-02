@@ -2,7 +2,8 @@
 OUT = retrommclone
 
 OBJS = \
-	src/main.o
+	src/main.o \
+	src/websock.o
 
 DEPS = $(patsubst %.o,%.deps,$(OBJS))
 
