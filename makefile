@@ -12,7 +12,7 @@ CC_FLAGS += -O2 -fmax-errors=3 -Wall -Werror -Wno-strict-aliasing -Wno-error=unu
 
 LNK = cc
 LNK_FLAGS += -o $(OUT) -rdynamic -g
-LNK_LIBS += -lpthread -ldl -lm
+LNK_LIBS += -lpthread -ldl -lm -lGL
 
 ifdef DEBUG
 	CC_FLAGS += -g
