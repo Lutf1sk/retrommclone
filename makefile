@@ -24,9 +24,6 @@ endif
 
 LT_PATH = lt/bin/lt.a
 
-test: all
-	tests/runall.sh
-
 all: $(LT_PATH) $(OUT)
 
 $(LT_PATH):
