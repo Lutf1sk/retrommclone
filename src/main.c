@@ -18,7 +18,7 @@
 #define HOST "retrommo2.herokuapp.com"
 #define PORT "80"
 
-#define USER "test@test"
+#define USER "test2@test"
 #define PASS "test"
 
 #include <time.h>
@@ -44,10 +44,27 @@ struct player {
 #define MAX_PLAYERS 64
 
 player_t players[MAX_PLAYERS];
-u8 player_count = 0;
+int player_count = 0;
 
 char player_usernames[MAX_PLAYERS][18];
 char player_slugs[MAX_PLAYERS][21];
+
+typedef
+struct character {
+	lstr_t name;
+	u32 page;
+} character_t;
+
+#define MAX_CHARACTERS 21
+
+character_t characters[MAX_CHARACTERS];
+int character_count = 0;
+char character_names[MAX_CHARACTERS][16];
+u8 sel_charid = 0;
+
+#define MAX_MSGS 256
+lstr_t chat_msgs[MAX_MSGS];
+int chat_msg_count = 0;
 
 void send_pong(lt_socket_t* sock) {
 	ws_send_text(sock, CLSTR("3"));
@@ -76,10 +93,34 @@ player_t* find_player_from_slug(lstr_t slug) {
 	return NULL;
 }
 
+#define CMD_SWITCH_CHAR 1
+u8 cmd = 0;
+u8 cmd_charid = 0;
+
+#define RETRO_CHARSEL	0
+#define RETRO_WORLD		1
+
+u8 retro_state = RETRO_CHARSEL;
+
+void switch_char(u8 charid) {
+	cmd = CMD_SWITCH_CHAR;
+	cmd_charid = charid;
+
+	LT_ASSERT(charid < character_count);
+}
+
+void send_click(lt_arena_t* arena, int x, int y) {
+	char* msg_buf = lt_arena_reserve(arena, 0);
+	usz msg_len = lt_str_printf(msg_buf, "42[\"mousedown\",{\"x\":%id.0,\"y\":%id.0}]", x, y);
+	ws_send_text(sock, LSTR(msg_buf, msg_len));
+
+	msg_len = lt_str_printf(msg_buf, "42[\"mouseup\",{\"x\":%id.0,\"y\":%id.0}]", x, y);
+	ws_send_text(sock, LSTR(msg_buf, msg_len));
+}
+
 void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 	if (lt_lstr_eq(it->str_val, CLSTR("play"))) {
 		lt_printf("Successfully connected to '%s'\n", HOST);
-		send_chat(arena, sock, CLSTR("global"), CLSTR("test"));
 	}
 	else if (lt_lstr_eq(it->str_val, CLSTR("update"))) {
 		lt_spinlock_lock(&state_lock);
@@ -94,9 +135,63 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		lt_json_t* pieces = lt_json_find_child(it->next, CLSTR("pieces"));
 		lt_json_t* piece_it = pieces->child;
 		player_count = 0;
+
+		lt_json_t* logout = lt_json_find_child(pieces, CLSTR("Switch|picture/world-logout"));
+
+		if (lt_json_find_child(pieces, CLSTR("Label|character-select-title")))
+			retro_state = RETRO_CHARSEL;
+		else if (logout)
+			retro_state = RETRO_WORLD;
+		else
+			LT_ASSERT_NOT_REACHED();
+
+		u32 charsel_pageid = 0;
+
+		if (retro_state == RETRO_CHARSEL) {
+			lt_json_t* rarrow = lt_json_find_child(pieces, CLSTR("Switch|picture/character-customize-page-left"));
+			lt_json_t* page = lt_json_find_child(pieces, CLSTR("Label|character-select-page"));
+
+			if (page) {
+				lstr_t pagelbl = lt_json_find_child(page, CLSTR("text"))->str_val;
+				usz pfx_len = CLSTR("Page ").len;
+				charsel_pageid = lt_lstr_uint(LSTR(pagelbl.str + pfx_len, pagelbl.len - pfx_len)) - 1;
+				lt_printf("PageID: %ud\n", charsel_pageid);
+			}
+
+			if (cmd == CMD_SWITCH_CHAR && characters[cmd_charid].page == charsel_pageid) {
+				char* key_buf = lt_arena_reserve(arena, 0);
+				usz key_len = lt_str_printf(key_buf, "Switch|picture/character-select-character-%ud-play", cmd_charid % 7);
+				lt_json_t* play = lt_json_find_child(pieces, LSTR(key_buf, key_len));
+
+				int x = lt_json_int_val(lt_json_find_child(play, CLSTR("x")));
+				int y = lt_json_int_val(lt_json_find_child(play, CLSTR("y")));
+
+				send_click(arena, x + 1, y + 1);
+
+ 				sel_charid = cmd_charid;
+ 				cmd = 0;
+			}
+			else if (rarrow && page)
+				send_click(arena, 223, 203);
+		}
+		else if (retro_state == RETRO_WORLD) {
+			if (cmd == CMD_SWITCH_CHAR) {
+				if (cmd_charid == sel_charid)
+					cmd = 0;
+				else {
+					int x = lt_json_int_val(lt_json_find_child(logout, CLSTR("x")));
+					int y = lt_json_int_val(lt_json_find_child(logout, CLSTR("y")));
+
+					send_click(arena, x + 1, y + 1);
+				}
+			}
+		}
+
 		while (piece_it) {
 			if (lstr_startswith(piece_it->key, CLSTR("Player|"))) {
-				lstr_t slug = LSTR(piece_it->key.str + 7, piece_it->key.len - 7);
+				usz pfx_len = CLSTR("Player|").len;
+
+				lstr_t slug = LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len);
 				lstr_t username = lt_json_find_child(piece_it, CLSTR("username"))->str_val;
 
 				memcpy(player_slugs[player_count], slug.str, slug.len);
@@ -107,27 +202,51 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 				player_count++;
 			}
+			else if (retro_state == RETRO_CHARSEL && lstr_startswith(piece_it->key, CLSTR("Label|character-select-character-"))) {
+				usz pfx_len = CLSTR("Label|character-select-character-").len;
+				usz char_id = lt_lstr_uint(LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len));
+
+				char_id += charsel_pageid * 7;
+
+				if (char_id + 1 > character_count)
+					character_count = char_id + 1;
+
+				lstr_t name = lt_json_find_child(piece_it, CLSTR("text"))->str_val;
+
+				characters[char_id].name.str = character_names[char_id];
+				characters[char_id].name.len = name.len;
+				characters[char_id].page = charsel_pageid;
+				memcpy(character_names[char_id], name.str, name.len);
+			}
 			piece_it = piece_it->next;
 		}
 
 		lt_json_t* chats = lt_json_find_child(it->next, CLSTR("chats"));
-
 		lt_json_t* chat_it = chats->child;
 		while (chat_it) {
 			lstr_t type = lt_json_find_child(chat_it, CLSTR("type"))->str_val;
+			lstr_t player_slug = lt_json_find_child(chat_it, CLSTR("playerSlug"))->str_val;
+
+			char* chat_buf = lt_arena_reserve(arena, 0);
+			usz chat_len = 0;
+
 			if (lt_lstr_eq(type, CLSTR("message"))) {
+				lstr_t username = find_player_from_slug(player_slug)->username;
 				lstr_t msg = lt_json_find_child(chat_it, CLSTR("contents"))->str_val;
-				lstr_t channel = lt_json_find_child(chat_it, CLSTR("channel"))->str_val;
-				lstr_t player_slug = lt_json_find_child(chat_it, CLSTR("playerSlug"))->str_val;
-
-				char* key_buf = lt_arena_reserve(arena, 0);
-				usz key_len = lt_str_printf(key_buf, "Player|%S", player_slug);
-				lt_json_t* player = lt_json_find_child(pieces, LSTR(key_buf, key_len));
-
-				lstr_t name = lt_json_find_child(player, CLSTR("username"))->str_val;
-
-				lt_printf("(%S)[%S]: %S\n", channel, name, msg);
+// 				lstr_t channel = lt_json_find_child(chat_it, CLSTR("channel"))->str_val;
+				chat_len = lt_str_printf(chat_buf, "[%S] %S", username, msg);
 			}
+			else if (lt_lstr_eq(type, CLSTR("login"))) {
+				lstr_t username = find_player_from_slug(player_slug)->username;
+				chat_len = lt_str_printf(chat_buf, "%S has logged in", username);
+			}
+// 			else if (lt_lstr_eq(type, CLSTR("logout")))
+// 				chat_len = lt_str_printf(chat_buf, "%S has logged out", username);
+
+			chat_msgs[chat_msg_count].str = malloc(chat_len);
+			chat_msgs[chat_msg_count].len = chat_len;
+			memcpy(chat_msgs[chat_msg_count].str, chat_buf, chat_len);
+			chat_msg_count++;
 
 			chat_it = chat_it->next;
 		}
@@ -273,9 +392,10 @@ void load_texture(char* path, GLint* id) {
 	lt_arena_restore(arena, &arestore);
 }
 
-void recv_thread_proc(void* usr) {
-	while (!lt_window_closed(win)) {
+b8 quit = 0;
 
+void recv_thread_proc(void* usr) {
+	while (!lt_window_closed(win) && !quit) {
 		lt_arestore_t arestore = lt_arena_save(arena);
 
 		u8 frame[8];
@@ -335,6 +455,7 @@ void recv_thread_proc(void* usr) {
 
 			case WS_CLOSE:
 				ws_send_frame_start(sock, WS_FIN | WS_CLOSE, 0);
+				quit = 1;
 				goto closed;
 
 			case WS_PING:
@@ -454,32 +575,71 @@ int main(int argc, char** argv) {
 
 	lt_thread_t* recv_thread = lt_thread_create(arena, recv_thread_proc, NULL);
 
-	while (!lt_window_closed(win)) {
-		render_init();
+	#define SIDEBAR_W 225
 
+	b8 playerlist_state = 0;
+	u32 charlist_state = 0;
+
+	render_init();
+
+	while (!lt_window_closed(win) && !quit) {
 		lt_window_event_t ev[16];
 		lt_window_poll_events(win, ev, 16);
+
+		lt_window_mouse_pos(win, &cx->mouse_x, &cx->mouse_y);
+		cx->mouse_state = lt_window_key_pressed(win, LT_KEY_MB1);
 
 		render_begin(win);
 
 		int width, height;
 		lt_window_get_size(win, &width, &height);
 
+		lt_spinlock_lock(&state_lock);
+
 		lt_gui_begin(cx, width, height);
 
 		lt_gui_panel_begin(cx, 0, 0, 0);
-		lt_gui_label(cx, CLSTR("RetroMMClone"), 0);
+
+		lt_gui_row(cx, 3);
+		if (lt_gui_dropdown_begin(cx, CLSTR("Character"), 96, character_count * 18, &charlist_state, 0)) {
+			for (usz i = 0; i < character_count; ++i) {
+				if (lt_gui_button(cx, characters[i].name, 0))
+					switch_char(i);
+			}
+			lt_gui_dropdown_end(cx);
+		}
+
+		if (lt_gui_button(cx, CLSTR("Log out"), LT_GUI_ALIGN_RIGHT)) {
+			quit = 1;
+		}
+		if (lt_gui_button(cx, CLSTR("Settings"), LT_GUI_ALIGN_RIGHT))
+			;
+
+		lt_gui_row(cx, 2);
+		lt_gui_panel_begin(cx, -SIDEBAR_W, 0, 0);
+		lt_gui_panel_end(cx);
 
 		lt_gui_panel_begin(cx, 0, 0, 0);
-		lt_spinlock_lock(&state_lock);
-		for (usz i = 0; i < player_count; ++i)
-			lt_gui_label(cx, players[i].username, 0);
-		lt_spinlock_release(&state_lock);
+		if (lt_gui_expandable(cx, CLSTR("Players"), &playerlist_state, 0)) {
+			lt_gui_panel_begin(cx, 0, (font->height) * player_count + 6 + (2 * player_count - 1), 0);
+			for (usz i = 0; i < player_count; ++i)
+				lt_gui_label(cx, players[i].username, 0);
+			lt_gui_panel_end(cx);
+		}
+
+		lt_gui_panel_begin(cx, 0, 0, 0);
+		for (usz i = 0; i < chat_msg_count; ++i) {
+			lt_gui_label(cx, chat_msgs[i], 0);
+		}
+		lt_gui_panel_end(cx);
+
 		lt_gui_panel_end(cx);
 
 		lt_gui_panel_end(cx);
 
 		lt_gui_end(cx);
+
+		lt_spinlock_release(&state_lock);
 
 		render_end(win);
 	}
