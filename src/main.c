@@ -53,6 +53,7 @@ typedef
 struct character {
 	lstr_t name;
 	u32 page;
+	b8 present;
 } character_t;
 
 #define MAX_CHARACTERS 21
@@ -61,6 +62,11 @@ character_t characters[MAX_CHARACTERS];
 int character_count = 0;
 char character_names[MAX_CHARACTERS][16];
 u8 sel_charid = 0;
+
+#define MAX_INV_ITEMS 8
+lstr_t inv_items[MAX_INV_ITEMS];
+char inv_item_names[MAX_INV_ITEMS][32];
+int inv_item_count = 0;
 
 #define MAX_MSGS 256
 lstr_t chat_msgs[MAX_MSGS];
@@ -94,17 +100,24 @@ player_t* find_player_from_slug(lstr_t slug) {
 }
 
 #define CMD_SWITCH_CHAR 1
-u8 cmd = 0;
+#define CMD_GET_CHARS	2
+u8 cmd = CMD_GET_CHARS;
 u8 cmd_charid = 0;
+int cmd_start_page = -1;
+b8 cmd_pages_wrapped = 0;
 
 #define RETRO_CHARSEL	0
 #define RETRO_WORLD		1
+#define RETRO_INVENTORY	2
+#define RETRO_SPELLBOOK	3
 
-u8 retro_state = RETRO_CHARSEL;
+u8 retro_state;
 
 void switch_char(u8 charid) {
 	cmd = CMD_SWITCH_CHAR;
 	cmd_charid = charid;
+
+	lt_printf("Selecting character %ud on page %ud\n", charid % 7, characters[charid].page);
 
 	LT_ASSERT(charid < character_count);
 }
@@ -118,6 +131,15 @@ void send_click(lt_arena_t* arena, int x, int y) {
 	ws_send_text(sock, LSTR(msg_buf, msg_len));
 }
 
+void send_key(lt_arena_t* arena, char key) {
+	char* msg_buf = lt_arena_reserve(arena, 0);
+	usz msg_len = lt_str_printf(msg_buf, "42[\"keydown\",\"%c\"]", key);
+	ws_send_text(sock, LSTR(msg_buf, msg_len));
+
+	msg_len = lt_str_printf(msg_buf, "42[\"keyup\",\"%c\"]", key);
+	ws_send_text(sock, LSTR(msg_buf, msg_len));
+}
+
 void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 	if (lt_lstr_eq(it->str_val, CLSTR("play"))) {
 		lt_printf("Successfully connected to '%s'\n", HOST);
@@ -125,12 +147,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 	else if (lt_lstr_eq(it->str_val, CLSTR("update"))) {
 		lt_spinlock_lock(&state_lock);
 
-		static b8 printed = 0;
-
-		if (!printed) {
-			lt_json_print(lt_stdout, it->next);
-			printed = 1;
-		}
+		send_key(arena, 'c');
 
 		lt_json_t* pieces = lt_json_find_child(it->next, CLSTR("pieces"));
 		lt_json_t* piece_it = pieces->child;
@@ -138,13 +155,31 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 		lt_json_t* logout = lt_json_find_child(pieces, CLSTR("Switch|picture/world-logout"));
 
+		lt_json_t* botbar_inv = lt_json_find_child(pieces, CLSTR("Picture|bottom-bar-icon/inventory"));
+		lt_json_t* botbar_spellb = lt_json_find_child(pieces, CLSTR("Picture|bottom-bar-icon/spellbook"));
+
 		if (lt_json_find_child(pieces, CLSTR("Label|character-select-title")))
 			retro_state = RETRO_CHARSEL;
-		else if (logout)
-			retro_state = RETRO_WORLD;
+		else if (logout) {
+			lt_json_t* gold = lt_json_find_child(pieces, CLSTR("Label|world-inventory-gold"));
+			lstr_t inv_img_slug = lt_json_find_child(botbar_inv, CLSTR("imageSourceSlug"))->str_val;
+			lstr_t spellb_img_slug = lt_json_find_child(botbar_spellb, CLSTR("imageSourceSlug"))->str_val;
+
+			if (lt_lstr_eq(inv_img_slug, CLSTR("bottom-bar-icons/inventory-selected"))) {
+				retro_state = RETRO_INVENTORY;
+			}
+			else if (lt_lstr_eq(spellb_img_slug, CLSTR("bottom-bar-icons/spellbook-selected")))
+				retro_state = RETRO_SPELLBOOK;
+			else
+				retro_state = RETRO_WORLD;
+		}
 		else
 			LT_ASSERT_NOT_REACHED();
 
+// 		lt_json_print(lt_stdout, it->next);
+
+		static int last_pageid = -1;
+		static b8 awaiting_pageswitch = 0;
 		u32 charsel_pageid = 0;
 
 		if (retro_state == RETRO_CHARSEL) {
@@ -155,13 +190,27 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				lstr_t pagelbl = lt_json_find_child(page, CLSTR("text"))->str_val;
 				usz pfx_len = CLSTR("Page ").len;
 				charsel_pageid = lt_lstr_uint(LSTR(pagelbl.str + pfx_len, pagelbl.len - pfx_len)) - 1;
-				lt_printf("PageID: %ud\n", charsel_pageid);
 			}
+
+			if (cmd == CMD_GET_CHARS) {
+				if (cmd_start_page == -1)
+					cmd_start_page = charsel_pageid;
+				else if (charsel_pageid != cmd_start_page || !page || !rarrow)
+					cmd_pages_wrapped = 1;
+
+				if (cmd_start_page == charsel_pageid && cmd_pages_wrapped)
+					cmd = 0;
+			}
+
+			if (charsel_pageid != last_pageid)
+				awaiting_pageswitch = 0;
 
 			if (cmd == CMD_SWITCH_CHAR && characters[cmd_charid].page == charsel_pageid) {
 				char* key_buf = lt_arena_reserve(arena, 0);
 				usz key_len = lt_str_printf(key_buf, "Switch|picture/character-select-character-%ud-play", cmd_charid % 7);
 				lt_json_t* play = lt_json_find_child(pieces, LSTR(key_buf, key_len));
+
+				lt_printf("Sending character selection click on page %ud\n", charsel_pageid);
 
 				int x = lt_json_int_val(lt_json_find_child(play, CLSTR("x")));
 				int y = lt_json_int_val(lt_json_find_child(play, CLSTR("y")));
@@ -170,20 +219,22 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
  				sel_charid = cmd_charid;
  				cmd = 0;
+ 				inv_item_count = 0;
 			}
-			else if (rarrow && page)
-				send_click(arena, 223, 203);
+			else if (cmd == CMD_GET_CHARS || (cmd == CMD_SWITCH_CHAR && charsel_pageid != characters[cmd_charid].page)) {
+				if (!awaiting_pageswitch) {
+					lt_printf("Sending next page click on page %ud\n", charsel_pageid);
+					send_click(arena, 223, 203);
+					awaiting_pageswitch = 1;
+				}
+			}
 		}
 		else if (retro_state == RETRO_WORLD) {
-			if (cmd == CMD_SWITCH_CHAR) {
-				if (cmd_charid == sel_charid)
-					cmd = 0;
-				else {
-					int x = lt_json_int_val(lt_json_find_child(logout, CLSTR("x")));
-					int y = lt_json_int_val(lt_json_find_child(logout, CLSTR("y")));
+			if (cmd == CMD_SWITCH_CHAR || cmd == CMD_GET_CHARS) {
+				int x = lt_json_int_val(lt_json_find_child(logout, CLSTR("x")));
+				int y = lt_json_int_val(lt_json_find_child(logout, CLSTR("y")));
 
-					send_click(arena, x + 1, y + 1);
-				}
+				send_click(arena, x + 1, y + 1);
 			}
 		}
 
@@ -202,7 +253,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 				player_count++;
 			}
-			else if (retro_state == RETRO_CHARSEL && lstr_startswith(piece_it->key, CLSTR("Label|character-select-character-"))) {
+			else if (cmd == CMD_GET_CHARS && lstr_startswith(piece_it->key, CLSTR("Label|character-select-character-"))) {
 				usz pfx_len = CLSTR("Label|character-select-character-").len;
 				usz char_id = lt_lstr_uint(LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len));
 
@@ -216,7 +267,20 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				characters[char_id].name.str = character_names[char_id];
 				characters[char_id].name.len = name.len;
 				characters[char_id].page = charsel_pageid;
+				characters[char_id].present = 1;
 				memcpy(character_names[char_id], name.str, name.len);
+			}
+			else if (retro_state == RETRO_INVENTORY && lstr_startswith(piece_it->key, CLSTR("Label|world-inventory-bag-"))) {
+				usz pfx_len = CLSTR("Label|world-inventory-bag-").len;
+				usz slot_id = lt_lstr_uint(LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len));
+
+				if (slot_id + 1 > inv_item_count)
+					inv_item_count = slot_id + 1;
+
+				lstr_t name = lt_json_find_child(piece_it, CLSTR("text"))->str_val;
+				inv_items[slot_id].str = inv_item_names[slot_id];
+				inv_items[slot_id].len = name.len;
+				memcpy(inv_item_names[slot_id], name.str, name.len);
 			}
 			piece_it = piece_it->next;
 		}
@@ -250,6 +314,8 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 			chat_it = chat_it->next;
 		}
+
+		last_pageid = charsel_pageid;
 
 		lt_spinlock_release(&state_lock);
 	}
@@ -601,7 +667,7 @@ int main(int argc, char** argv) {
 		lt_gui_panel_begin(cx, 0, 0, 0);
 
 		lt_gui_row(cx, 3);
-		if (lt_gui_dropdown_begin(cx, CLSTR("Character"), 96, character_count * 18, &charlist_state, 0)) {
+		if (lt_gui_dropdown_begin(cx, CLSTR("Character"), 8 * 8, character_count * 18, &charlist_state, 0)) {
 			for (usz i = 0; i < character_count; ++i) {
 				if (lt_gui_button(cx, characters[i].name, 0))
 					switch_char(i);
@@ -617,6 +683,8 @@ int main(int argc, char** argv) {
 
 		lt_gui_row(cx, 2);
 		lt_gui_panel_begin(cx, -SIDEBAR_W, 0, 0);
+		for (usz i = 0; i < inv_item_count; ++i)
+			lt_gui_label(cx, inv_items[i], 0);
 		lt_gui_panel_end(cx);
 
 		lt_gui_panel_begin(cx, 0, 0, 0);
