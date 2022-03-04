@@ -608,6 +608,8 @@ int main(int argc, char** argv) {
 	if (!lt_socket_connect(sock, &saddr))
 		lt_ferrf("Failed to connect to '%s:%s'\n", HOST, PORT);
 
+	// POST /authenticate
+
 	lstr_t login_json = CLSTR("{\"email\":\""USER"\",\"password\":\""PASS"\",\"hcaptchaToken\":\"\"}");
 
 	char* out_buf = lt_arena_reserve(arena, 0);
@@ -629,6 +631,88 @@ int main(int argc, char** argv) {
 	handle_http_response(arena, sock, token_buf, &token.len);
 
 	lt_printf("Got login token: %S\n", token);
+
+	// GET /
+	out_len = lt_str_printf(out_buf,
+		"GET / HTTP/1.1\r\n"
+		"Host: %s\r\n"
+		"Connection: keep-alive\r\n"
+		"\r\n",
+		HOST
+	);
+	lt_socket_send(sock, out_buf, out_len);
+
+	char* html_str = lt_arena_reserve(arena, 0);
+	usz html_len = 0;
+	handle_http_response(arena, sock, html_str, &html_len);
+	lt_arena_reserve(arena, html_len);
+
+	// Find beginning of data-definitions attribute
+	lstr_t ddef_signature = CLSTR("data-definitions=\"");
+	char* defs_start = NULL;
+	char* defs_it = html_str, *html_end = html_str + html_len - ddef_signature.len;
+	while (defs_it < html_end) {
+		if (*defs_it == 'd' && lt_lstr_eq(LSTR(defs_it, ddef_signature.len), ddef_signature)) {
+			defs_start = defs_it + ddef_signature.len;
+			defs_it += ddef_signature.len;
+			break;
+		}
+		++defs_it;
+	}
+
+	if (!defs_start)
+		lt_ferrf("Failed to find data definitions\n");
+
+	// Find end of data-definitions attribute
+	usz defs_len = 0;
+	while (defs_it < html_end) {
+		if (*defs_it == '"') {
+			defs_len = defs_it - defs_start;
+			break;
+		}
+		++defs_it;
+	}
+
+	if (!defs_len)
+		lt_ferrf("Failed to find end of data definitions\n");
+
+	// Unescape data-definitions json
+	char* ddefs = lt_arena_reserve(arena, 0);
+	char* ddefs_it = ddefs;
+	for (usz i = 0; i < defs_len;) {
+		char c = defs_start[i++];
+		if (c == '&') {
+			char* escape_start = &defs_start[i];
+			usz escape_len = 0;
+			while (i < defs_len && defs_start[i++] != ';')
+				++escape_len;
+			lstr_t escape = LSTR(escape_start, escape_len);
+			if (lt_lstr_eq(CLSTR("quot"), escape))
+				*ddefs_it++ = '"';
+			else if (lt_lstr_eq(CLSTR("#x2F"), escape))
+				*ddefs_it++ = '/';
+			else
+				lt_werrf("Unknown escape sequence '%S'\n", escape);
+		}
+		else
+			*ddefs_it++ = c;
+	}
+	usz ddefs_len = ddefs_it - ddefs;
+	lt_arena_reserve(arena, ddefs_len);
+
+// 	lt_printf("%S\n", LSTR(ddefs, ddefs_len));
+
+	lt_json_t* ddefs_js = lt_json_parse(arena, ddefs, ddefs_len);
+
+	lt_json_t* ddef_it = ddefs_js->child;
+	while (ddef_it) {
+		lt_printf("%S\n", ddef_it->key);
+		ddef_it = ddef_it->next;
+	}
+
+// 	lt_json_print(lt_stdout, lt_json_find_child(ddefs_js, CLSTR("Tilemap|inn")));
+
+	// Upgrade to websocket
 
 	out_len = lt_str_printf(out_buf,
 		"GET /socket.io/?EIO=4&transport=websocket&t=%ud HTTP/1.1\r\n"
