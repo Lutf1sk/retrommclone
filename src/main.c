@@ -23,6 +23,9 @@
 
 #include <time.h>
 
+#define USERNAME_MAXLEN 18
+#define USERSLUG_MAXLEN 21
+
 void glGenerateMipmap(GLint);
 
 lt_arena_t* arena = NULL;
@@ -32,6 +35,8 @@ lt_font_t* font = NULL;
 
 GLint icons[LT_GUI_ICON_MAX];
 GLint glyph_bm;
+
+int local_playerid = 0;
 
 typedef
 struct player {
@@ -46,8 +51,8 @@ struct player {
 player_t players[MAX_PLAYERS];
 int player_count = 0;
 
-char player_usernames[MAX_PLAYERS][18];
-char player_slugs[MAX_PLAYERS][21];
+char player_usernames[MAX_PLAYERS][USERNAME_MAXLEN];
+char player_slugs[MAX_PLAYERS][USERSLUG_MAXLEN];
 
 typedef
 struct character {
@@ -67,6 +72,8 @@ u8 sel_charid = 0;
 lstr_t inv_items[MAX_INV_ITEMS];
 char inv_item_names[MAX_INV_ITEMS][32];
 int inv_item_count = 0;
+
+u64 gold = 0;
 
 #define MAX_MSGS 256
 lstr_t chat_msgs[MAX_MSGS];
@@ -149,6 +156,8 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 		send_key(arena, 'c');
 
+		lstr_t local_player_slug = lt_json_find_child(it->next, CLSTR("playerSlug"))->str_val;
+
 		lt_json_t* pieces = lt_json_find_child(it->next, CLSTR("pieces"));
 		lt_json_t* piece_it = pieces->child;
 		player_count = 0;
@@ -161,13 +170,12 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		if (lt_json_find_child(pieces, CLSTR("Label|character-select-title")))
 			retro_state = RETRO_CHARSEL;
 		else if (logout) {
-			lt_json_t* gold = lt_json_find_child(pieces, CLSTR("Label|world-inventory-gold"));
+			lt_json_t*   gold = lt_json_find_child(pieces, CLSTR("Label|world-inventory-gold"));
 			lstr_t inv_img_slug = lt_json_find_child(botbar_inv, CLSTR("imageSourceSlug"))->str_val;
 			lstr_t spellb_img_slug = lt_json_find_child(botbar_spellb, CLSTR("imageSourceSlug"))->str_val;
 
-			if (lt_lstr_eq(inv_img_slug, CLSTR("bottom-bar-icons/inventory-selected"))) {
+			if (lt_lstr_eq(inv_img_slug, CLSTR("bottom-bar-icons/inventory-selected")))
 				retro_state = RETRO_INVENTORY;
-			}
 			else if (lt_lstr_eq(spellb_img_slug, CLSTR("bottom-bar-icons/spellbook-selected")))
 				retro_state = RETRO_SPELLBOOK;
 			else
@@ -210,7 +218,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				usz key_len = lt_str_printf(key_buf, "Switch|picture/character-select-character-%ud-play", cmd_charid % 7);
 				lt_json_t* play = lt_json_find_child(pieces, LSTR(key_buf, key_len));
 
-				lt_printf("Sending character selection click on page %ud\n", charsel_pageid);
+				lt_printf("Sending 'character select' click on page %ud\n", charsel_pageid);
 
 				int x = lt_json_int_val(lt_json_find_child(play, CLSTR("x")));
 				int y = lt_json_int_val(lt_json_find_child(play, CLSTR("y")));
@@ -223,13 +231,13 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 			}
 			else if (cmd == CMD_GET_CHARS || (cmd == CMD_SWITCH_CHAR && charsel_pageid != characters[cmd_charid].page)) {
 				if (!awaiting_pageswitch) {
-					lt_printf("Sending next page click on page %ud\n", charsel_pageid);
+					lt_printf("Sending 'next page' click on page %ud\n", charsel_pageid);
 					send_click(arena, 223, 203);
 					awaiting_pageswitch = 1;
 				}
 			}
 		}
-		else if (retro_state == RETRO_WORLD) {
+		else if (retro_state == RETRO_WORLD || retro_state == RETRO_INVENTORY || retro_state == RETRO_SPELLBOOK) {
 			if (cmd == CMD_SWITCH_CHAR || cmd == CMD_GET_CHARS) {
 				int x = lt_json_int_val(lt_json_find_child(logout, CLSTR("x")));
 				int y = lt_json_int_val(lt_json_find_child(logout, CLSTR("y")));
@@ -250,6 +258,9 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 				players[player_count].username = LSTR(player_usernames[player_count], username.len);
 				players[player_count].slug = LSTR(player_slugs[player_count], slug.len);
+
+				if (lt_lstr_eq(slug, local_player_slug))
+					local_playerid = player_count;
 
 				player_count++;
 			}
@@ -358,8 +369,8 @@ void render_create_tex(int w, int h, void* data, GLint* id) {
 
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
 	glGenerateMipmap(GL_TEXTURE_2D);
@@ -666,25 +677,31 @@ int main(int argc, char** argv) {
 
 		lt_gui_panel_begin(cx, 0, 0, 0);
 
-		lt_gui_row(cx, 3);
-		if (lt_gui_dropdown_begin(cx, CLSTR("Character"), 8 * 8, character_count * 18, &charlist_state, 0)) {
+		lt_gui_row(cx, 5);
+		if (lt_gui_dropdown_begin(cx, CLSTR("Character"), 8*8, character_count * 18, &charlist_state, 0)) {
 			for (usz i = 0; i < character_count; ++i) {
-				if (lt_gui_button(cx, characters[i].name, 0))
+				if (lt_gui_button(cx, characters[i].name, LT_GUI_ALIGN_RIGHT))
 					switch_char(i);
 			}
 			lt_gui_dropdown_end(cx);
 		}
 
-		if (lt_gui_button(cx, CLSTR("Log out"), LT_GUI_ALIGN_RIGHT)) {
+		lt_gui_hspace(cx, 4, 0);
+		lt_gui_label(cx, players[local_playerid].username, 0);
+
+		if (lt_gui_button(cx, CLSTR("Log out"), LT_GUI_ALIGN_RIGHT))
 			quit = 1;
-		}
 		if (lt_gui_button(cx, CLSTR("Settings"), LT_GUI_ALIGN_RIGHT))
 			;
 
 		lt_gui_row(cx, 2);
 		lt_gui_panel_begin(cx, -SIDEBAR_W, 0, 0);
-		for (usz i = 0; i < inv_item_count; ++i)
+		lt_gui_label(cx, CLSTR("Inventory:"), 0);
+		for (usz i = 0; i < inv_item_count; ++i) {
+			lt_gui_row(cx, 2);
+			lt_gui_label(cx, CLSTR(" - "), 0);
 			lt_gui_label(cx, inv_items[i], 0);
+		}
 		lt_gui_panel_end(cx);
 
 		lt_gui_panel_begin(cx, 0, 0, 0);
