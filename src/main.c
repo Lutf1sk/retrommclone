@@ -9,6 +9,7 @@
 #include <lt/font.h>
 #include <lt/utf8.h>
 #include <lt/img.h>
+#include <lt/ctype.h>
 
 #include "websock.h"
 #include "net_helpers.h"
@@ -56,8 +57,10 @@ char player_slugs[MAX_PLAYERS][USERSLUG_MAXLEN];
 
 typedef
 struct character {
-	lstr_t name;
-	u32 page;
+	lstr_t class_name;
+	lstr_t description;
+	u8 page;
+	u8 level;
 	b8 present;
 } character_t;
 
@@ -65,7 +68,7 @@ struct character {
 
 character_t characters[MAX_CHARACTERS];
 int character_count = 0;
-char character_names[MAX_CHARACTERS][16];
+char character_descriptions[MAX_CHARACTERS][32];
 u8 sel_charid = 0;
 
 #define MAX_INV_ITEMS 8
@@ -73,7 +76,8 @@ lstr_t inv_items[MAX_INV_ITEMS];
 char inv_item_names[MAX_INV_ITEMS][32];
 int inv_item_count = 0;
 
-u64 gold = 0;
+lstr_t gold;
+char gold_buf[32];
 
 #define MAX_MSGS 256
 lstr_t chat_msgs[MAX_MSGS];
@@ -95,6 +99,14 @@ b8 lstr_startswith(lstr_t str, lstr_t substr) {
 	if (str.len < substr.len)
 		return 0;
 	return memcmp(str.str, substr.str, substr.len) == 0;
+}
+
+b8 lstr_endswith(lstr_t str, lstr_t substr) {
+	if (str.len < substr.len)
+		return 0;
+
+	char* end = str.str + str.len;
+	return memcmp(end - substr.len, substr.str, substr.len) == 0;
 }
 
 player_t* find_player_from_slug(lstr_t slug) {
@@ -170,7 +182,6 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		if (lt_json_find_child(pieces, CLSTR("Label|character-select-title")))
 			retro_state = RETRO_CHARSEL;
 		else if (logout) {
-			lt_json_t*   gold = lt_json_find_child(pieces, CLSTR("Label|world-inventory-gold"));
 			lstr_t inv_img_slug = lt_json_find_child(botbar_inv, CLSTR("imageSourceSlug"))->str_val;
 			lstr_t spellb_img_slug = lt_json_find_child(botbar_spellb, CLSTR("imageSourceSlug"))->str_val;
 
@@ -228,6 +239,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
  				sel_charid = cmd_charid;
  				cmd = 0;
  				inv_item_count = 0;
+ 				gold = NLSTR();
 			}
 			else if (cmd == CMD_GET_CHARS || (cmd == CMD_SWITCH_CHAR && charsel_pageid != characters[cmd_charid].page)) {
 				if (!awaiting_pageswitch) {
@@ -275,11 +287,20 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 				lstr_t name = lt_json_find_child(piece_it, CLSTR("text"))->str_val;
 
-				characters[char_id].name.str = character_names[char_id];
-				characters[char_id].name.len = name.len;
+				char* lv_begin = name.str + CLSTR("Lv").len, *lv_it = lv_begin;
+				while (lt_is_digit(*lv_it))
+					++lv_it;
+				characters[char_id].level = lt_lstr_uint(LSTR(lv_begin, lv_it - lv_begin));
+				if (lstr_endswith(name, CLSTR("WR")))
+					characters[char_id].class_name = CLSTR("Warrior");
+				else if (lstr_endswith(name, CLSTR("WZ")))
+					characters[char_id].class_name = CLSTR("Wizard");
+				else if (lstr_endswith(name, CLSTR("CL")))
+					characters[char_id].class_name = CLSTR("Cleric");
+				characters[char_id].description.str = character_descriptions[char_id];
+				characters[char_id].description.len = lt_str_printf(character_descriptions[char_id], "%ud %S", char_id + 1, characters[char_id].class_name);
 				characters[char_id].page = charsel_pageid;
 				characters[char_id].present = 1;
-				memcpy(character_names[char_id], name.str, name.len);
 			}
 			else if (retro_state == RETRO_INVENTORY && lstr_startswith(piece_it->key, CLSTR("Label|world-inventory-bag-"))) {
 				usz pfx_len = CLSTR("Label|world-inventory-bag-").len;
@@ -315,8 +336,10 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				lstr_t username = find_player_from_slug(player_slug)->username;
 				chat_len = lt_str_printf(chat_buf, "%S has logged in", username);
 			}
-// 			else if (lt_lstr_eq(type, CLSTR("logout")))
+			else if (lt_lstr_eq(type, CLSTR("logout"))) {
 // 				chat_len = lt_str_printf(chat_buf, "%S has logged out", username);
+				continue;
+			}
 
 			chat_msgs[chat_msg_count].str = malloc(chat_len);
 			chat_msgs[chat_msg_count].len = chat_len;
@@ -324,6 +347,14 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 			chat_msg_count++;
 
 			chat_it = chat_it->next;
+		}
+
+		if (retro_state == RETRO_INVENTORY) {
+			lt_json_t* gold_json = lt_json_find_child(pieces, CLSTR("Label|world-inventory-gold"));
+			lstr_t gold_str = lt_json_find_child(gold_json, CLSTR("text"))->str_val;
+			gold.str = gold_buf;
+			gold.len = gold_str.len;
+			memcpy(gold_buf, gold_str.str, gold_str.len);
 		}
 
 		last_pageid = charsel_pageid;
@@ -678,9 +709,9 @@ int main(int argc, char** argv) {
 		lt_gui_panel_begin(cx, 0, 0, 0);
 
 		lt_gui_row(cx, 5);
-		if (lt_gui_dropdown_begin(cx, CLSTR("Character"), 8*8, character_count * 18, &charlist_state, 0)) {
+		if (lt_gui_dropdown_begin(cx, CLSTR("Character"), 97, character_count * 18, &charlist_state, 0)) {
 			for (usz i = 0; i < character_count; ++i) {
-				if (lt_gui_button(cx, characters[i].name, LT_GUI_ALIGN_RIGHT))
+				if (lt_gui_button(cx, characters[i].description, LT_GUI_ALIGN_RIGHT | LT_GUI_BORDER_OUTSET | LT_GUI_GROW_X))
 					switch_char(i);
 			}
 			lt_gui_dropdown_end(cx);
@@ -689,33 +720,33 @@ int main(int argc, char** argv) {
 		lt_gui_hspace(cx, 4, 0);
 		lt_gui_label(cx, players[local_playerid].username, 0);
 
-		if (lt_gui_button(cx, CLSTR("Log out"), LT_GUI_ALIGN_RIGHT))
+		if (lt_gui_button(cx, CLSTR("Log out"), LT_GUI_ALIGN_RIGHT | LT_GUI_BORDER_OUTSET))
 			quit = 1;
-		if (lt_gui_button(cx, CLSTR("Settings"), LT_GUI_ALIGN_RIGHT))
+		if (lt_gui_button(cx, CLSTR("Settings"), LT_GUI_ALIGN_RIGHT | LT_GUI_BORDER_OUTSET))
 			;
 
 		lt_gui_row(cx, 2);
-		lt_gui_panel_begin(cx, -SIDEBAR_W, 0, 0);
+		lt_gui_panel_begin(cx, -SIDEBAR_W, 0, LT_GUI_BORDER_INSET);
 		lt_gui_label(cx, CLSTR("Inventory:"), 0);
 		for (usz i = 0; i < inv_item_count; ++i) {
 			lt_gui_row(cx, 2);
 			lt_gui_label(cx, CLSTR(" - "), 0);
 			lt_gui_label(cx, inv_items[i], 0);
 		}
+		lt_gui_label(cx, gold, 0);
 		lt_gui_panel_end(cx);
 
-		lt_gui_panel_begin(cx, 0, 0, 0);
-		if (lt_gui_expandable(cx, CLSTR("Players"), &playerlist_state, 0)) {
-			lt_gui_panel_begin(cx, 0, (font->height) * player_count + 6 + (2 * player_count - 1), 0);
+		lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_INSET);
+		if (lt_gui_expandable(cx, CLSTR("Players"), &playerlist_state, LT_GUI_BORDER_OUTSET)) {
+			lt_gui_panel_begin(cx, 0, (font->height) * player_count + 6 + (2 * player_count - 1), LT_GUI_BORDER_OUTSET);
 			for (usz i = 0; i < player_count; ++i)
 				lt_gui_label(cx, players[i].username, 0);
 			lt_gui_panel_end(cx);
 		}
 
-		lt_gui_panel_begin(cx, 0, 0, 0);
-		for (usz i = 0; i < chat_msg_count; ++i) {
+		lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_OUTSET);
+		for (usz i = 0; i < chat_msg_count; ++i)
 			lt_gui_label(cx, chat_msgs[i], 0);
-		}
 		lt_gui_panel_end(cx);
 
 		lt_gui_panel_end(cx);
