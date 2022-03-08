@@ -7,14 +7,13 @@
 #include <lt/thread.h>
 #include <lt/gui.h>
 #include <lt/font.h>
-#include <lt/utf8.h>
 #include <lt/img.h>
+#include <lt/utf8.h>
 #include <lt/ctype.h>
 
 #include "websock.h"
 #include "net_helpers.h"
-
-#include <GL/gl.h>
+#include "render.h"
 
 #define HOST "retrommo2.herokuapp.com"
 #define PORT "80"
@@ -27,15 +26,13 @@
 #define USERNAME_MAXLEN 18
 #define USERSLUG_MAXLEN 21
 
-void glGenerateMipmap(GLint);
-
 lt_arena_t* arena = NULL;
 lt_socket_t* sock = NULL;
 lt_window_t* win = NULL;
 lt_font_t* font = NULL;
 
-GLint icons[LT_GUI_ICON_MAX];
-GLint glyph_bm;
+int icons[LT_GUI_ICON_MAX];
+int glyph_bm;
 
 int local_playerid = 0;
 
@@ -93,20 +90,6 @@ void send_chat(lt_arena_t* arena, lt_socket_t* sock, lstr_t channel, lstr_t msg)
 	char* buf = lt_arena_reserve(arena, 0);
 	usz len = lt_str_printf(buf, "42[\"message\",{\"channel\":\"%S\",\"contents\":\"%S\"}]", channel, msg);
 	ws_send_text(sock, LSTR(buf, len));
-}
-
-b8 lstr_startswith(lstr_t str, lstr_t substr) {
-	if (str.len < substr.len)
-		return 0;
-	return memcmp(str.str, substr.str, substr.len) == 0;
-}
-
-b8 lstr_endswith(lstr_t str, lstr_t substr) {
-	if (str.len < substr.len)
-		return 0;
-
-	char* end = str.str + str.len;
-	return memcmp(end - substr.len, substr.str, substr.len) == 0;
 }
 
 player_t* find_player_from_slug(lstr_t slug) {
@@ -259,7 +242,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		}
 
 		while (piece_it) {
-			if (lstr_startswith(piece_it->key, CLSTR("Player|"))) {
+			if (lt_lstr_startswith(piece_it->key, CLSTR("Player|"))) {
 				usz pfx_len = CLSTR("Player|").len;
 
 				lstr_t slug = LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len);
@@ -276,7 +259,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 				player_count++;
 			}
-			else if (cmd == CMD_GET_CHARS && lstr_startswith(piece_it->key, CLSTR("Label|character-select-character-"))) {
+			else if (cmd == CMD_GET_CHARS && lt_lstr_startswith(piece_it->key, CLSTR("Label|character-select-character-"))) {
 				usz pfx_len = CLSTR("Label|character-select-character-").len;
 				usz char_id = lt_lstr_uint(LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len));
 
@@ -291,18 +274,18 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				while (lt_is_digit(*lv_it))
 					++lv_it;
 				characters[char_id].level = lt_lstr_uint(LSTR(lv_begin, lv_it - lv_begin));
-				if (lstr_endswith(name, CLSTR("WR")))
+				if (lt_lstr_endswith(name, CLSTR("WR")))
 					characters[char_id].class_name = CLSTR("Warrior");
-				else if (lstr_endswith(name, CLSTR("WZ")))
+				else if (lt_lstr_endswith(name, CLSTR("WZ")))
 					characters[char_id].class_name = CLSTR("Wizard");
-				else if (lstr_endswith(name, CLSTR("CL")))
+				else if (lt_lstr_endswith(name, CLSTR("CL")))
 					characters[char_id].class_name = CLSTR("Cleric");
 				characters[char_id].description.str = character_descriptions[char_id];
 				characters[char_id].description.len = lt_str_printf(character_descriptions[char_id], "%ud %S", char_id + 1, characters[char_id].class_name);
 				characters[char_id].page = charsel_pageid;
 				characters[char_id].present = 1;
 			}
-			else if (retro_state == RETRO_INVENTORY && lstr_startswith(piece_it->key, CLSTR("Label|world-inventory-bag-"))) {
+			else if (retro_state == RETRO_INVENTORY && lt_lstr_startswith(piece_it->key, CLSTR("Label|world-inventory-bag-"))) {
 				usz pfx_len = CLSTR("Label|world-inventory-bag-").len;
 				usz slot_id = lt_lstr_uint(LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len));
 
@@ -366,125 +349,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 	}
 }
 
-void render_init(void) {
-	glEnable(GL_BLEND);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	glDisable(GL_CULL_FACE);
-	glDisable(GL_DEPTH_TEST);
-	glEnable(GL_SCISSOR_TEST);
-}
-
-void render_begin(lt_window_t* win) {
-	int width, height;
-	lt_window_get_size(win, &width, &height);
-
-	glViewport(0, 0, width, height);
-	glScissor(0, 0, width, height);
-
-	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-	glMatrixMode(GL_PROJECTION);
-	glLoadIdentity();
-	glOrtho(0.0, width, height, 0.0f, -1.0f, +1.0f);
-}
-
-void render_end(lt_window_t* win) {
-	lt_window_gl_swap_buffers(win);
-	glFinish();
-}
-
-void render_create_tex(int w, int h, void* data, GLint* id) {
-	glGenTextures(1, id);
-	glBindTexture(GL_TEXTURE_2D, *id);
-
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-	glGenerateMipmap(GL_TEXTURE_2D);
-}
-
-void render_draw_rect(void* usr, usz count, lt_gui_rect_t* r, u32* clrs) {
-	glBegin(GL_QUADS);
-	for (usz i = 0; i < count; ++i) {
-		u32 clr = clrs[i];
-		u8 cr = (clr >> 16) & 0xFF;
-		u8 cg = (clr >> 8) & 0xFF;
-		u8 cb = clr & 0xFF;
-
-		glColor3ub(cr, cg, cb); glVertex2f(r[i].x, r[i].y);
-		glColor3ub(cr, cg, cb); glVertex2f(r[i].x + r[i].w, r[i].y);
-		glColor3ub(cr, cg, cb); glVertex2f(r[i].x + r[i].w, r[i].y + r[i].h);
-		glColor3ub(cr, cg, cb); glVertex2f(r[i].x, r[i].y + r[i].h);
-	}
-	glEnd();
-}
-
-void render_draw_text(void* usr, usz count, lt_gui_point_t* pts, lstr_t* strs, u32* clrs) {
-	usz w = font->width, h = font->height;
-
-	glBindTexture(GL_TEXTURE_2D, glyph_bm);
-	glEnable(GL_TEXTURE_2D);
-
-	float uv_w = 1.0f / font->glyph_count;
-
-	glBegin(GL_QUADS);
-	for (usz i = 0; i < count; ++i) {
-		u32 clr = clrs[i];
-		u8 r = (clr >> 16) & 0xFF;
-		u8 g = (clr >> 8) & 0xFF;
-		u8 b = clr & 0xFF;
-
-		i32 x = pts[i].x;
-		i32 y = pts[i].y;
-
-		lstr_t text = strs[i];
-		char* it = text.str, *end = text.str + text.len;
-		while (it < end) {
-			u32 c;
-			it += lt_utf8_decode(&c, it);
-			float beg = c * uv_w, end = beg + uv_w;
-			glColor3ub(r, g, b); glTexCoord2f(beg, 0.0f); glVertex2f(x, y);
-			glColor3ub(r, g, b); glTexCoord2f(end, 0.0f); glVertex2f(x + w, y);
-			glColor3ub(r, g, b); glTexCoord2f(end, 1.0f); glVertex2f(x + w, y + h);
-			glColor3ub(r, g, b); glTexCoord2f(beg, 1.0f); glVertex2f(x, y + h);
-
-			x += w;
-		}
-	}
-	glEnd();
-
-	glDisable(GL_TEXTURE_2D);
-}
-
-void render_draw_icon(void* usr, usz icon, lt_gui_rect_t* r, u32 clr) {
-	u8 cr = (clr >> 16) & 0xFF;
-	u8 cg = (clr >> 8) & 0xFF;
-	u8 cb = clr & 0xFF;
-
-	glBindTexture(GL_TEXTURE_2D, icons[icon]);
-	glEnable(GL_TEXTURE_2D);
-
-	glBegin(GL_QUADS);
-	glColor3ub(cr, cg, cb); glTexCoord2f(0.0f, 0.0f); glVertex2f(r->x, r->y);
-	glColor3ub(cr, cg, cb); glTexCoord2f(1.0f, 0.0f); glVertex2f(r->x + r->w, r->y);
-	glColor3ub(cr, cg, cb); glTexCoord2f(1.0f, 1.0f); glVertex2f(r->x + r->w, r->y + r->h);
-	glColor3ub(cr, cg, cb); glTexCoord2f(0.0f, 1.0f); glVertex2f(r->x, r->y + r->h);
-	glEnd();
-
-	glDisable(GL_TEXTURE_2D);
-}
-
-void render_scissor(void* usr, lt_gui_rect_t* r) {
-	int width, height;
-	lt_window_get_size(win, &width, &height);
-	glScissor(r->x, height - (r->y + r->h), r->w, r->h);
-}
-
-void load_texture(char* path, GLint* id) {
+void load_texture(char* path, int* id) {
 	lt_arestore_t arestore = lt_arena_save(arena);
 
 	lstr_t tex_file;
