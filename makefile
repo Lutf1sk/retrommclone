@@ -4,7 +4,9 @@ OUT = retrommclone
 OBJS = \
 	src/main.o \
 	src/render.o \
-	src/websock.o
+	src/websock.o \
+	src/stb_image.o \
+	src/resource.o
 
 DEPS = $(patsubst %.o,%.deps,$(OBJS))
 

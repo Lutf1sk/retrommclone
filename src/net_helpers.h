@@ -1,6 +1,10 @@
 #ifndef NET_HELPERS_H
 #define NET_HELPERS_H 1
 
+#include <lt/net.h>
+#include <lt/mem.h>
+#include <lt/str.h>
+
 static
 isz recv_fixed(lt_socket_t* sock, void* data, isz bytes) {
 	u8* it = data;

@@ -14,17 +14,16 @@
 #include "websock.h"
 #include "net_helpers.h"
 #include "render.h"
-
-#define HOST "retrommo2.herokuapp.com"
-#define PORT "80"
-
-#define USER "test2@test"
-#define PASS "test"
+#include "config.h"
+#include "resource.h"
 
 #include <time.h>
+#include <GL/gl.h>
 
 #define USERNAME_MAXLEN 18
 #define USERSLUG_MAXLEN 21
+
+typedef struct tilemap tilemap_t;
 
 lt_arena_t* arena = NULL;
 lt_socket_t* sock = NULL;
@@ -42,6 +41,7 @@ struct player {
 	lstr_t username;
 	u8 direction;
 	int x, y;
+	tilemap_t* tilemap;
 } player_t;
 
 #define MAX_PLAYERS 64
@@ -51,6 +51,43 @@ int player_count = 0;
 
 char player_usernames[MAX_PLAYERS][USERNAME_MAXLEN];
 char player_slugs[MAX_PLAYERS][USERSLUG_MAXLEN];
+
+typedef
+struct chest {
+	lstr_t slug;
+	i32 opened_at;
+	int texture;
+} chest_t;
+
+#define MAX_CHESTS 128
+
+chest_t chests[MAX_CHESTS];
+usz chest_count = 0;
+
+typedef
+struct bank {
+	lstr_t slug;
+	i32 opened_at;
+	i32 closed_at;
+	int texture;
+} bank_t;
+
+#define MAX_BANKS 128
+
+bank_t banks[MAX_BANKS];
+usz bank_count = 0;
+
+typedef
+struct npc {
+	lstr_t slug;
+	lstr_t name;
+	int texture;
+} npc_t;
+
+#define MAX_NPCS 128
+
+npc_t npcs[MAX_NPCS];
+usz npc_count = 0;
 
 typedef
 struct character {
@@ -80,6 +117,43 @@ char gold_buf[32];
 lstr_t chat_msgs[MAX_MSGS];
 int chat_msg_count = 0;
 
+
+typedef
+struct tileset {
+	lstr_t name;
+	b8* collisions;
+	i8* chests, *banks, *npcs;
+	usz tile_count;
+	usz width;
+	usz height;
+
+	int texture;
+} tileset_t;
+
+#define MAX_TILESETS 32
+
+tileset_t tilesets[MAX_TILESETS];
+char tileset_names[MAX_TILESETS][32];
+usz tileset_count = 0;
+
+typedef
+struct tilemap {
+	lstr_t name;
+	tileset_t** tilesets;
+	u16* tileset_start_indices;
+	usz tileset_count;
+
+	usz w, h;
+	u16* tiles, *a_tile_indices, *b_tile_indices;
+	i16* chest_indices, *bank_indices, *npc_indices;
+} tilemap_t;
+
+#define MAX_TILEMAPS 16
+
+tilemap_t tilemaps[MAX_TILEMAPS];
+char tilemap_names[MAX_TILEMAPS][32];
+usz tilemap_count = 0;
+
 void send_pong(lt_socket_t* sock) {
 	ws_send_text(sock, CLSTR("3"));
 }
@@ -99,6 +173,233 @@ player_t* find_player_from_slug(lstr_t slug) {
 
 	LT_ASSERT_NOT_REACHED();
 	return NULL;
+}
+
+tilemap_t* find_tilemap(lstr_t slug) {
+	for (usz i = 0; i < tilemap_count; ++i)
+		if (lt_lstr_eq(slug, tilemaps[i].name))
+			return &tilemaps[i];
+	return NULL;
+}
+
+tileset_t* find_tileset(lstr_t slug) {
+	for (usz i = 0; i < tileset_count; ++i)
+		if (lt_lstr_eq(slug, tilesets[i].name))
+			return &tilesets[i];
+	return NULL;
+}
+
+i8 find_chest_index(lstr_t slug) {
+	for (usz i = 0; i < chest_count; ++i)
+		if (lt_lstr_eq(slug, chests[i].slug))
+			return i;
+	return -1;
+}
+
+i8 find_bank_index(lstr_t slug) {
+	for (usz i = 0; i < bank_count; ++i)
+		if (lt_lstr_eq(slug, banks[i].slug))
+			return i;
+	return -1;
+}
+
+i8 find_npc_index(lstr_t slug) {
+	for (usz i = 0; i < npc_count; ++i)
+		if (lt_lstr_eq(slug, npcs[i].slug))
+			return i;
+	return -1;
+}
+
+chest_t* chest_add(lt_arena_t* arena, lt_json_t* json) {
+	usz pfx_len = CLSTR("Chest|").len;
+	chests[chest_count].slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+	chests[chest_count].opened_at = -1;
+	return &chests[chest_count++];
+}
+
+bank_t* bank_add(lt_arena_t* arena, lt_json_t* json) {
+	usz pfx_len = CLSTR("Bank|").len;
+	banks[bank_count].slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+	banks[bank_count].opened_at = -1;
+	return &banks[bank_count++];
+}
+
+npc_t* npc_add(lt_arena_t* arena, lt_json_t* json) {
+	usz pfx_len = CLSTR("NPC|").len;
+	npcs[npc_count].slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+	npcs[npc_count].name = lt_json_find_child(json, CLSTR("name"))->str_val;
+	return &npcs[npc_count++];
+}
+
+tileset_t* tileset_add(lt_arena_t* arena, lt_json_t* json) {
+	lt_json_t* tiles = lt_json_find_child(json, CLSTR("tiles"));
+
+	usz cols = lt_json_uint_val(lt_json_find_child(json, CLSTR("width")));
+	usz rows = tiles->child->child_count;
+	LT_ASSERT(cols && rows);
+
+	lt_json_t* it = tiles->child;
+	LT_ASSERT(tiles->child_count == cols);
+
+	usz tile_count = rows * cols;
+	b8* collision = lt_arena_reserve(arena, tile_count * sizeof(b8));
+	i8* chests = lt_arena_reserve(arena, tile_count * sizeof(i8));
+	i8* banks = lt_arena_reserve(arena, tile_count * sizeof(i8));
+	i8* npcs = lt_arena_reserve(arena, tile_count * sizeof(i8));
+
+	usz x = 0;
+	while (it) {
+		lt_json_t* tile_it = it->child;
+		usz y = 0;
+		while (tile_it) {
+			usz index = y * cols + x;
+			collision[index] = lt_json_bool_val(lt_json_find_child(tile_it, CLSTR("collision")));
+
+			lstr_t bankslug = lt_json_find_child(tile_it, CLSTR("bankSlug"))->str_val;
+			lstr_t chestslug = lt_json_find_child(tile_it, CLSTR("chestSlug"))->str_val;
+			lstr_t npcslug = lt_json_find_child(tile_it, CLSTR("npcSlug"))->str_val;
+
+			if (chestslug.len)
+				chests[index] = find_chest_index(chestslug);
+			else
+				chests[index] = -1;
+
+			if (bankslug.len)
+				banks[index] = find_bank_index(bankslug);
+			else
+				banks[index] = -1;
+
+			if (npcslug.len)
+				npcs[index] = find_npc_index(npcslug);
+			else
+				npcs[index] = -1;
+
+			tile_it = tile_it->next;
+			++y;
+		}
+		LT_ASSERT(y == rows);
+
+		++x;
+		it = it->next;
+	}
+	LT_ASSERT(x == cols);
+
+	usz pfx_len = CLSTR("Tileset|").len;
+	lstr_t name = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+
+	char buf[128];
+	usz len = lt_str_printf(buf, "tilesets/%S", name);
+	res_load_texture(arena, LSTR(buf, len), &tilesets[tileset_count].texture);
+
+	tilesets[tileset_count].tile_count = tile_count;
+	tilesets[tileset_count].width = cols;
+	tilesets[tileset_count].height = rows;
+	tilesets[tileset_count].collisions = collision;
+	tilesets[tileset_count].chests = chests;
+	tilesets[tileset_count].banks = banks;
+	tilesets[tileset_count].npcs = npcs;
+	tilesets[tileset_count].name = name;
+	return &tilesets[tileset_count++];
+}
+
+tileset_t* tilemap_lookup_index(tilemap_t* tilemap, u16* tile_ptr) {
+	u16 tile = *tile_ptr;
+
+	for (usz i = 0; i < tilemap->tileset_count; ++i) {
+		usz start = tilemap->tileset_start_indices[i];
+		if (tile >= start && tile < start + tilemap->tilesets[i]->tile_count) {
+			*tile_ptr -= start;
+			return tilemap->tilesets[i];
+		}
+	}
+	return NULL;
+}
+
+tilemap_t* tilemap_add(lt_arena_t* arena, lt_json_t* json) {
+	lt_json_t* tiles_js = lt_json_find_child(json, CLSTR("tiles"));
+
+	usz h = tiles_js->child_count;
+	usz w = tiles_js->child->child_count;
+	LT_ASSERT(w && h);
+
+	usz tile_count = h * w;
+
+	u16* a_tiles = lt_arena_reserve(arena, tile_count * 2 * sizeof(u16));
+	u16* b_tiles = lt_arena_reserve(arena, tile_count * 2 * sizeof(u16));
+	i16* chests = lt_arena_reserve(arena, tile_count * sizeof(i16));
+	i16* banks = lt_arena_reserve(arena, tile_count * sizeof(i16));
+	i16* npcs = lt_arena_reserve(arena, tile_count * sizeof(i16));
+	u16* tiles = lt_arena_reserve(arena, 0);
+
+	u16 tile_it = 0, tile_index = 0;
+
+	LT_ASSERT(tiles_js->child_count == h);
+	for (lt_json_t* i = tiles_js->child; i; i = i->next) {
+		LT_ASSERT(i->child_count == w);
+		for (lt_json_t* j = i->child; j; j = j->next) {
+			a_tiles[tile_it] = tile_index;
+			for (lt_json_t* a_it = lt_json_find_child(j, CLSTR("aboveIndices"))->child; a_it; a_it = a_it->next)
+				tiles[tile_index++] = lt_json_uint_val(a_it);
+			a_tiles[tile_it + 1] = tile_index - a_tiles[tile_it];
+
+			b_tiles[tile_it] = tile_index;
+			for (lt_json_t* b_it = lt_json_find_child(j, CLSTR("belowIndices"))->child; b_it; b_it = b_it->next)
+				tiles[tile_index++] = lt_json_uint_val(b_it);
+			b_tiles[tile_it + 1] = tile_index - b_tiles[tile_it];
+
+			lt_json_t* chest = lt_json_find_child(j, CLSTR("chestIndex"));
+			lt_json_t* bank = lt_json_find_child(j, CLSTR("bankIndex"));
+			lt_json_t* npc = lt_json_find_child(j, CLSTR("npcIndex"));
+
+			if (chest->stype != LT_JSON_NULL)
+				chests[tile_it / 2] = lt_json_uint_val(chest);
+			else
+				chests[tile_it / 2] = -1;
+
+			if (bank->stype != LT_JSON_NULL)
+				banks[tile_it / 2] = lt_json_uint_val(bank);
+			else
+				banks[tile_it / 2] = -1;
+
+			if (npc->stype != LT_JSON_NULL)
+				npcs[tile_it / 2] = lt_json_uint_val(npc);
+			else
+				npcs[tile_it / 2] = -1;
+
+			tile_it += 2;
+		}
+	}
+
+	lt_arena_reserve(arena, tile_index * sizeof(u16));
+
+	lt_json_t* sets_js = lt_json_find_child(json, CLSTR("tilesets"));
+	usz set_count = sets_js->child_count;
+	tileset_t** sets = lt_arena_reserve(arena, set_count * sizeof(tileset_t*));
+	u16* set_start_indices = lt_arena_reserve(arena, set_count * sizeof(u16));
+
+	usz set_i = 0;
+	for (lt_json_t* set_it = sets_js->child; set_it; set_it = set_it->next) {
+		sets[set_i] = find_tileset(lt_json_find_child(set_it, CLSTR("tileset"))->str_val);
+		set_start_indices[set_i++] = lt_json_uint_val(lt_json_find_child(set_it, CLSTR("firstTileID")));
+	}
+
+	tilemaps[tilemap_count].w = w;
+	tilemaps[tilemap_count].h = h;
+	tilemaps[tilemap_count].tiles = tiles;
+	tilemaps[tilemap_count].a_tile_indices = a_tiles;
+	tilemaps[tilemap_count].b_tile_indices = b_tiles;
+
+	tilemaps[tilemap_count].tileset_start_indices = set_start_indices;
+	tilemaps[tilemap_count].tilesets = sets;
+	tilemaps[tilemap_count].tileset_count = tileset_count;
+	tilemaps[tilemap_count].chest_indices = chests;
+	tilemaps[tilemap_count].bank_indices = banks;
+	tilemaps[tilemap_count].npc_indices = npcs;
+
+	usz pfx_len = CLSTR("Tilemap|").len;
+	tilemaps[tilemap_count].name = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+
+	return &tilemaps[tilemap_count++];
 }
 
 #define CMD_SWITCH_CHAR 1
@@ -133,13 +434,23 @@ void send_click(lt_arena_t* arena, int x, int y) {
 	ws_send_text(sock, LSTR(msg_buf, msg_len));
 }
 
-void send_key(lt_arena_t* arena, char key) {
+void send_key_down(lt_arena_t* arena, char key) {
 	char* msg_buf = lt_arena_reserve(arena, 0);
 	usz msg_len = lt_str_printf(msg_buf, "42[\"keydown\",\"%c\"]", key);
 	ws_send_text(sock, LSTR(msg_buf, msg_len));
+	lt_printf("%S\n", LSTR(msg_buf, msg_len));
+}
 
-	msg_len = lt_str_printf(msg_buf, "42[\"keyup\",\"%c\"]", key);
+void send_key_up(lt_arena_t* arena, char key) {
+	char* msg_buf = lt_arena_reserve(arena, 0);
+	usz msg_len = lt_str_printf(msg_buf, "42[\"keyup\",\"%c\"]", key);
 	ws_send_text(sock, LSTR(msg_buf, msg_len));
+	lt_printf("%S\n", LSTR(msg_buf, msg_len));
+}
+
+void send_key(lt_arena_t* arena, char key) {
+	send_key_down(arena, key);
+	send_key_up(arena, key);
 }
 
 void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
@@ -157,20 +468,20 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		lt_json_t* piece_it = pieces->child;
 		player_count = 0;
 
-		lt_json_t* logout = lt_json_find_child(pieces, CLSTR("Switch|picture/world-logout"));
+		lt_json_t* logout = lt_json_find_child(pieces, CLSTR("Switch|picture/world/logout"));
 
-		lt_json_t* botbar_inv = lt_json_find_child(pieces, CLSTR("Picture|bottom-bar-icon/inventory"));
-		lt_json_t* botbar_spellb = lt_json_find_child(pieces, CLSTR("Picture|bottom-bar-icon/spellbook"));
+		lt_json_t* botbar_inv = lt_json_find_child(pieces, CLSTR("Picture|world/bottom-bar/icons/inventory"));
+		lt_json_t* botbar_spellb = lt_json_find_child(pieces, CLSTR("Picture|world/bottom-bar/icons/spellbook"));
 
-		if (lt_json_find_child(pieces, CLSTR("Label|character-select-title")))
+		if (lt_json_find_child(pieces, CLSTR("Label|character-select/title")))
 			retro_state = RETRO_CHARSEL;
 		else if (logout) {
 			lstr_t inv_img_slug = lt_json_find_child(botbar_inv, CLSTR("imageSourceSlug"))->str_val;
 			lstr_t spellb_img_slug = lt_json_find_child(botbar_spellb, CLSTR("imageSourceSlug"))->str_val;
 
-			if (lt_lstr_eq(inv_img_slug, CLSTR("bottom-bar-icons/inventory-selected")))
+			if (lt_lstr_eq(inv_img_slug, CLSTR("bottom-bar-icons/inventory/selected")))
 				retro_state = RETRO_INVENTORY;
-			else if (lt_lstr_eq(spellb_img_slug, CLSTR("bottom-bar-icons/spellbook-selected")))
+			else if (lt_lstr_eq(spellb_img_slug, CLSTR("bottom-bar-icons/spellbook/selected")))
 				retro_state = RETRO_SPELLBOOK;
 			else
 				retro_state = RETRO_WORLD;
@@ -185,8 +496,8 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		u32 charsel_pageid = 0;
 
 		if (retro_state == RETRO_CHARSEL) {
-			lt_json_t* rarrow = lt_json_find_child(pieces, CLSTR("Switch|picture/character-customize-page-left"));
-			lt_json_t* page = lt_json_find_child(pieces, CLSTR("Label|character-select-page"));
+			lt_json_t* rarrow = lt_json_find_child(pieces, CLSTR("Switch|picture/character-customize/page/left"));
+			lt_json_t* page = lt_json_find_child(pieces, CLSTR("Label|character-select/page"));
 
 			if (page) {
 				lstr_t pagelbl = lt_json_find_child(page, CLSTR("text"))->str_val;
@@ -209,7 +520,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 			if (cmd == CMD_SWITCH_CHAR && characters[cmd_charid].page == charsel_pageid) {
 				char* key_buf = lt_arena_reserve(arena, 0);
-				usz key_len = lt_str_printf(key_buf, "Switch|picture/character-select-character-%ud-play", cmd_charid % 7);
+				usz key_len = lt_str_printf(key_buf, "Switch|picture/character-select/character/%ud/play", cmd_charid % 7);
 				lt_json_t* play = lt_json_find_child(pieces, LSTR(key_buf, key_len));
 
 				lt_printf("Sending 'character select' click on page %ud\n", charsel_pageid);
@@ -254,13 +565,26 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				players[player_count].username = LSTR(player_usernames[player_count], username.len);
 				players[player_count].slug = LSTR(player_slugs[player_count], slug.len);
 
+				lt_json_t* tilemap_js = lt_json_find_child(piece_it, CLSTR("tilemapSlug"));
+				if (tilemap_js->stype == LT_JSON_STRING)
+					players[player_count].tilemap = find_tilemap(tilemap_js->str_val);
+				else
+					players[player_count].tilemap = NULL;
+
 				if (lt_lstr_eq(slug, local_player_slug))
 					local_playerid = player_count;
 
+				lt_json_t* x_js = lt_json_find_child(piece_it, CLSTR("x"));
+				lt_json_t* y_js = lt_json_find_child(piece_it, CLSTR("y"));
+				if (x_js->stype != LT_JSON_NULL && y_js->stype != LT_JSON_NULL) {
+					players[player_count].x = lt_json_int_val(x_js);
+					players[player_count].y = lt_json_int_val(y_js);
+				}
+
 				player_count++;
 			}
-			else if (cmd == CMD_GET_CHARS && lt_lstr_startswith(piece_it->key, CLSTR("Label|character-select-character-"))) {
-				usz pfx_len = CLSTR("Label|character-select-character-").len;
+			else if (cmd == CMD_GET_CHARS && lt_lstr_startswith(piece_it->key, CLSTR("Label|character-select/character/"))) {
+				usz pfx_len = CLSTR("Label|character-select/character/").len;
 				usz char_id = lt_lstr_uint(LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len));
 
 				char_id += charsel_pageid * 7;
@@ -285,8 +609,8 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				characters[char_id].page = charsel_pageid;
 				characters[char_id].present = 1;
 			}
-			else if (retro_state == RETRO_INVENTORY && lt_lstr_startswith(piece_it->key, CLSTR("Label|world-inventory-bag-"))) {
-				usz pfx_len = CLSTR("Label|world-inventory-bag-").len;
+			else if (retro_state == RETRO_INVENTORY && lt_lstr_startswith(piece_it->key, CLSTR("Label|world/inventory/bag/"))) {
+				usz pfx_len = CLSTR("Label|world/inventory/bag/").len;
 				usz slot_id = lt_lstr_uint(LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len));
 
 				if (slot_id + 1 > inv_item_count)
@@ -333,7 +657,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		}
 
 		if (retro_state == RETRO_INVENTORY) {
-			lt_json_t* gold_json = lt_json_find_child(pieces, CLSTR("Label|world-inventory-gold"));
+			lt_json_t* gold_json = lt_json_find_child(pieces, CLSTR("Label|world/inventory/gold"));
 			lstr_t gold_str = lt_json_find_child(gold_json, CLSTR("text"))->str_val;
 			gold.str = gold_buf;
 			gold.len = gold_str.len;
@@ -360,7 +684,7 @@ void load_texture(char* path, int* id) {
 	if (!lt_img_load_tga(arena, tex_file.str, tex_file.len, &img))
 		lt_ferrf("Failed to load %s\n", path);
 
-	render_create_tex(img.width, img.height, img.data, id);
+	render_create_tex(img.width, img.height, img.data, id, TEXTURE_FILTER);
 
 	lt_arena_restore(arena, &arestore);
 }
@@ -428,6 +752,7 @@ void recv_thread_proc(void* usr) {
 
 			case WS_CLOSE:
 				ws_send_frame_start(sock, WS_FIN | WS_CLOSE, 0);
+				lt_printf("Connection closed by host\n");
 				quit = 1;
 				goto closed;
 
@@ -441,6 +766,27 @@ done:
 	}
 
 closed:
+}
+
+void draw_tile(tilemap_t* tilemap, float scr_x, float scr_y, float scr_tilew, u16 tile) {
+	tileset_t* tileset = tilemap_lookup_index(tilemap, &tile);
+	LT_ASSERT(tileset);
+
+	glBindTexture(GL_TEXTURE_2D, tileset->texture);
+
+	glBegin(GL_QUADS);
+
+	float ts_tilew = 1.0f / tileset->width;
+	float ts_tileh = 1.0f / tileset->height;
+	float ts_x = (tile % tileset->width) * ts_tilew;
+	float ts_y = (tile / tileset->width) * ts_tileh;
+
+	glTexCoord2f(ts_x, ts_y); glVertex2f(scr_x, scr_y);
+	glTexCoord2f(ts_x + ts_tilew, ts_y); glVertex2f(scr_x + scr_tilew, scr_y);
+	glTexCoord2f(ts_x + ts_tilew, ts_y + ts_tileh); glVertex2f(scr_x + scr_tilew, scr_y + scr_tilew);
+	glTexCoord2f(ts_x, ts_y + ts_tileh); glVertex2f(scr_x, scr_y + scr_tilew);
+
+	glEnd();
 }
 
 int main(int argc, char** argv) {
@@ -498,24 +844,14 @@ int main(int argc, char** argv) {
 	lt_printf("Got login token: %S\n", token);
 
 	// GET /
-	out_len = lt_str_printf(out_buf,
-		"GET / HTTP/1.1\r\n"
-		"Host: %s\r\n"
-		"Connection: keep-alive\r\n"
-		"\r\n",
-		HOST
-	);
-	lt_socket_send(sock, out_buf, out_len);
-
-	char* html_str = lt_arena_reserve(arena, 0);
-	usz html_len = 0;
-	handle_http_response(arena, sock, html_str, &html_len);
-	lt_arena_reserve(arena, html_len);
+	lstr_t ddef_html;
+	if (!res_load(arena, CLSTR("/"), &ddef_html))
+		lt_ferrf("Failed to load '/'\n");
 
 	// Find beginning of data-definitions attribute
 	lstr_t ddef_signature = CLSTR("data-definitions=\"");
 	char* defs_start = NULL;
-	char* defs_it = html_str, *html_end = html_str + html_len - ddef_signature.len;
+	char* defs_it = ddef_html.str, *html_end = ddef_html.str + ddef_html.len - ddef_signature.len;
 	while (defs_it < html_end) {
 		if (*defs_it == 'd' && lt_lstr_eq(LSTR(defs_it, ddef_signature.len), ddef_signature)) {
 			defs_start = defs_it + ddef_signature.len;
@@ -565,17 +901,32 @@ int main(int argc, char** argv) {
 	usz ddefs_len = ddefs_it - ddefs;
 	lt_arena_reserve(arena, ddefs_len);
 
-// 	lt_printf("%S\n", LSTR(ddefs, ddefs_len));
-
 	lt_json_t* ddefs_js = lt_json_parse(arena, ddefs, ddefs_len);
 
 	lt_json_t* ddef_it = ddefs_js->child;
 	while (ddef_it) {
-		lt_printf("%S\n", ddef_it->key);
+		if (lt_lstr_startswith(ddef_it->key, CLSTR("Chest|")))
+			chest_add(arena, ddef_it);
+		else if (lt_lstr_startswith(ddef_it->key, CLSTR("Bank|")))
+			bank_add(arena, ddef_it);
+		else if (lt_lstr_startswith(ddef_it->key, CLSTR("NPC|")))
+			npc_add(arena, ddef_it);
 		ddef_it = ddef_it->next;
 	}
 
-// 	lt_json_print(lt_stdout, lt_json_find_child(ddefs_js, CLSTR("Tilemap|inn")));
+	ddef_it = ddefs_js->child;
+	while (ddef_it) {
+		if (lt_lstr_startswith(ddef_it->key, CLSTR("Tileset|")))
+			tileset_add(arena, ddef_it);
+		ddef_it = ddef_it->next;
+	}
+
+	ddef_it = ddefs_js->child;
+	while (ddef_it) {
+		if (lt_lstr_startswith(ddef_it->key, CLSTR("Tilemap|")))
+			tilemap_add(arena, ddef_it);
+		ddef_it = ddef_it->next;
+	}
 
 	// Upgrade to websocket
 
@@ -613,7 +964,7 @@ int main(int argc, char** argv) {
 	u32* glyph_bm_buf = lt_arena_reserve(arena, 0);
 
 	lt_font_render(font, LSTR(buf, len), glyph_bm_buf);
-	render_create_tex(font->width * gcount, font->height, glyph_bm_buf, &glyph_bm);
+	render_create_tex(font->width * gcount, font->height, glyph_bm_buf, &glyph_bm, TEXTURE_FILTER);
 
 	load_texture("expanded.tga", &icons[LT_GUI_ICON_EXPANDED]);
 	load_texture("collapsed.tga", &icons[LT_GUI_ICON_COLLAPSED]);
@@ -639,6 +990,8 @@ int main(int argc, char** argv) {
 
 	render_init();
 
+	lt_arena_t* arena = lt_arena_alloc(LT_KB(8));
+
 	while (!lt_window_closed(win) && !quit) {
 		lt_window_event_t ev[16];
 		lt_window_poll_events(win, ev, 16);
@@ -652,6 +1005,24 @@ int main(int argc, char** argv) {
 		lt_window_get_size(win, &width, &height);
 
 		lt_spinlock_lock(&state_lock);
+
+		if (lt_window_key_pressed(win, LT_KEY_W))
+			send_key_down(arena, 'w');
+		if (lt_window_key_pressed(win, LT_KEY_A))
+			send_key_down(arena, 'a');
+		if (lt_window_key_pressed(win, LT_KEY_S))
+			send_key_down(arena, 's');
+		if (lt_window_key_pressed(win, LT_KEY_D))
+			send_key_down(arena, 'd');
+
+		if (lt_window_key_released(win, LT_KEY_W))
+			send_key_up(arena, 'w');
+		if (lt_window_key_released(win, LT_KEY_A))
+			send_key_up(arena, 'a');
+		if (lt_window_key_released(win, LT_KEY_S))
+			send_key_up(arena, 's');
+		if (lt_window_key_released(win, LT_KEY_D))
+			send_key_up(arena, 'd');
 
 		lt_gui_begin(cx, width, height);
 
@@ -676,13 +1047,15 @@ int main(int argc, char** argv) {
 
 		lt_gui_row(cx, 2);
 		lt_gui_panel_begin(cx, -SIDEBAR_W, 0, LT_GUI_BORDER_INSET);
-		lt_gui_label(cx, CLSTR("Inventory:"), 0);
-		for (usz i = 0; i < inv_item_count; ++i) {
-			lt_gui_row(cx, 2);
-			lt_gui_label(cx, CLSTR(" - "), 0);
-			lt_gui_label(cx, inv_items[i], 0);
-		}
-		lt_gui_label(cx, gold, 0);
+// 		lt_gui_label(cx, CLSTR("Inventory:"), 0);
+// 		for (usz i = 0; i < inv_item_count; ++i) {
+// 			lt_gui_row(cx, 2);
+// 			lt_gui_label(cx, CLSTR(" - "), 0);
+// 			lt_gui_label(cx, inv_items[i], 0);
+// 		}
+// 		lt_gui_label(cx, gold, 0);
+
+		lt_gui_rect_t game_area = lt_gui_get_container(cx)->a;
 		lt_gui_panel_end(cx);
 
 		lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_INSET);
@@ -703,6 +1076,76 @@ int main(int argc, char** argv) {
 		lt_gui_panel_end(cx);
 
 		lt_gui_end(cx);
+
+		render_scissor(NULL, &game_area);
+
+		tilemap_t* tilemap = players[local_playerid].tilemap;
+		if (tilemap) {
+			float scr_tilew = 32.0f;
+			float scr_tileoffs_x = game_area.x - (players[local_playerid].x * scr_tilew) + game_area.w/2 - scr_tilew/2;
+			float scr_tileoffs_y = game_area.y - (players[local_playerid].y * scr_tilew) + game_area.h/2 - scr_tilew/2;
+
+			glEnable(GL_TEXTURE_2D);
+			for (usz y = 0; y < tilemap->h; ++y) {
+				for (usz x = 0; x < tilemap->w; ++x) {
+					u16 tile_index = tilemap->b_tile_indices[(x * tilemap->w + y) * 2];
+					u16 tile_count = tilemap->b_tile_indices[(x * tilemap->w + y) * 2 + 1];
+
+					float scr_x = scr_tileoffs_x + x * scr_tilew;
+					float scr_y = scr_tileoffs_y + y * scr_tilew;
+
+					for (usz ti = 0; ti < tile_count; ++ti) {
+						u16 tile = tilemap->tiles[tile_index + ti];
+						draw_tile(tilemap, scr_x, scr_y, scr_tilew, tile);
+					}
+
+					i16 chest = tilemap->chest_indices[x * tilemap->h + y];
+					if (chest >= 0)
+						draw_tile(tilemap, scr_x, scr_y, scr_tilew, chest);
+
+					i16 bank = tilemap->bank_indices[x * tilemap->h + y];
+					if (bank >= 0)
+						draw_tile(tilemap, scr_x, scr_y, scr_tilew, bank);
+
+					i16 npc = tilemap->npc_indices[x * tilemap->h + y];
+					if (npc >= 0)
+						draw_tile(tilemap, scr_x, scr_y, scr_tilew, npc);
+				}
+			}
+			glDisable(GL_TEXTURE_2D);
+
+			for (usz i = 0; i < player_count; ++i) {
+				if (players[i].tilemap != tilemap)
+					continue;
+
+				float scr_x = scr_tileoffs_x + players[i].x * scr_tilew;
+				float scr_y = scr_tileoffs_y + players[i].y * scr_tilew;
+
+				glBegin(GL_QUADS);
+				glColor3ub(255, 255, 255); glVertex2f(scr_x, scr_y);
+				glColor3ub(255, 255, 255); glVertex2f(scr_x + scr_tilew, scr_y);
+				glColor3ub(255, 255, 255); glVertex2f(scr_x + scr_tilew, scr_y + scr_tilew);
+				glColor3ub(255, 255, 255); glVertex2f(scr_x, scr_y + scr_tilew);
+				glEnd();
+			}
+
+			glEnable(GL_TEXTURE_2D);
+			for (usz y = 0; y < tilemap->h; ++y) {
+				for (usz x = 0; x < tilemap->w; ++x) {
+					u16 tile_index = tilemap->a_tile_indices[(x * tilemap->w + y) * 2];
+					u16 tile_count = tilemap->a_tile_indices[(x * tilemap->w + y) * 2 + 1];
+
+					float scr_x = scr_tileoffs_x + x * scr_tilew;
+					float scr_y = scr_tileoffs_y + y * scr_tilew;
+
+					for (usz ti = 0; ti < tile_count; ++ti) {
+						u16 tile = tilemap->tiles[tile_index + ti];
+						draw_tile(tilemap, scr_x, scr_y, scr_tilew, tile);
+					}
+				}
+			}
+			glDisable(GL_TEXTURE_2D);
+		}
 
 		lt_spinlock_release(&state_lock);
 
