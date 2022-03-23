@@ -35,6 +35,11 @@ int glyph_bm;
 
 int local_playerid = 0;
 
+#define DIR_UP		0
+#define DIR_DOWN	1
+#define DIR_LEFT	2
+#define DIR_RIGHT	3
+
 typedef
 struct player {
 	lstr_t slug;
@@ -82,6 +87,7 @@ struct npc {
 	lstr_t slug;
 	lstr_t name;
 	int texture;
+	int indicator_texture;
 } npc_t;
 
 #define MAX_NPCS 128
@@ -158,7 +164,7 @@ void send_pong(lt_socket_t* sock) {
 	ws_send_text(sock, CLSTR("3"));
 }
 
-lt_spinlock_t state_lock = {0};
+lt_mutex_t* state_lock;
 
 void send_chat(lt_arena_t* arena, lt_socket_t* sock, lstr_t channel, lstr_t msg) {
 	char* buf = lt_arena_reserve(arena, 0);
@@ -210,10 +216,24 @@ i8 find_npc_index(lstr_t slug) {
 	return -1;
 }
 
+lstr_t asprintf(lt_arena_t* arena, char* fmt, ...) {
+	va_list list;
+	va_start(list, fmt);
+	char* str = lt_arena_reserve(arena, 0);
+	isz len = lt_str_vprintf(str, fmt, list);
+	lt_arena_reserve(arena, len);
+	va_end(list);
+	return LSTR(str, len);
+}
+
 chest_t* chest_add(lt_arena_t* arena, lt_json_t* json) {
 	usz pfx_len = CLSTR("Chest|").len;
 	chests[chest_count].slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
 	chests[chest_count].opened_at = -1;
+
+	lstr_t img_slug = lt_json_find_child(json, CLSTR("imageSourceSlug"))->str_val;
+	res_load_texture(arena, img_slug, &chests[chest_count].texture);
+
 	return &chests[chest_count++];
 }
 
@@ -221,13 +241,26 @@ bank_t* bank_add(lt_arena_t* arena, lt_json_t* json) {
 	usz pfx_len = CLSTR("Bank|").len;
 	banks[bank_count].slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
 	banks[bank_count].opened_at = -1;
+	banks[bank_count].closed_at = -1;
+
+	lstr_t img_slug = lt_json_find_child(json, CLSTR("imageSourceSlug"))->str_val;
+	res_load_texture(arena, img_slug, &banks[bank_count].texture);
+
 	return &banks[bank_count++];
 }
 
 npc_t* npc_add(lt_arena_t* arena, lt_json_t* json) {
 	usz pfx_len = CLSTR("NPC|").len;
-	npcs[npc_count].slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+	lstr_t slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+	npcs[npc_count].slug = slug;
 	npcs[npc_count].name = lt_json_find_child(json, CLSTR("name"))->str_val;
+
+	lstr_t img_slug = asprintf(arena, "npcs/%S", slug);
+	res_load_texture(arena, img_slug, &npcs[npc_count].texture);
+
+	img_slug = lt_json_find_child(json, CLSTR("indicatorImageSourceSlug"))->str_val;
+	LT_ASSERT(res_load_texture(arena, img_slug, &npcs[npc_count].indicator_texture));
+
 	return &npcs[npc_count++];
 }
 
@@ -409,10 +442,13 @@ u8 cmd_charid = 0;
 int cmd_start_page = -1;
 b8 cmd_pages_wrapped = 0;
 
+u8 state_switch_sent = 0;
+
 #define RETRO_CHARSEL	0
 #define RETRO_WORLD		1
 #define RETRO_INVENTORY	2
 #define RETRO_SPELLBOOK	3
+#define RETRO_STATS		4
 
 u8 retro_state;
 
@@ -453,14 +489,38 @@ void send_key(lt_arena_t* arena, char key) {
 	send_key_up(arena, key);
 }
 
+#include <lt/time.h>
+
 void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 	if (lt_lstr_eq(it->str_val, CLSTR("play"))) {
 		lt_printf("Successfully connected to '%s'\n", HOST);
 	}
 	else if (lt_lstr_eq(it->str_val, CLSTR("update"))) {
-		lt_spinlock_lock(&state_lock);
+// 		static u64 ltime = 0;
+// 		u64 time = lt_hfreq_time_msec();
+// 		lt_printf("Update %udms\n", time - ltime);
+// 		ltime = time;
 
-		send_key(arena, 'c');
+		lt_mutex_lock(state_lock);
+
+		lt_json_t* chats = lt_json_find_child(it->next, CLSTR("chats"));
+		lt_json_t* chat_it = chats->child;
+		while (chat_it) {
+			lstr_t type = lt_json_find_child(chat_it, CLSTR("type"))->str_val;
+			lstr_t player_slug = lt_json_find_child(chat_it, CLSTR("playerSlug"))->str_val;
+
+			if (lt_lstr_eq(type, CLSTR("logout"))) {
+				lstr_t username = find_player_from_slug(player_slug)->username;
+				lstr_t msg_str = asprintf(arena, "%S has logged out", username);
+
+				chat_msgs[chat_msg_count].str = malloc(msg_str.len);
+				chat_msgs[chat_msg_count].len = msg_str.len;
+				memcpy(chat_msgs[chat_msg_count].str, msg_str.str, msg_str.len);
+				chat_msg_count++;
+			}
+
+			chat_it = chat_it->next;
+		}
 
 		lstr_t local_player_slug = lt_json_find_child(it->next, CLSTR("playerSlug"))->str_val;
 
@@ -472,22 +532,37 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 		lt_json_t* botbar_inv = lt_json_find_child(pieces, CLSTR("Picture|world/bottom-bar/icons/inventory"));
 		lt_json_t* botbar_spellb = lt_json_find_child(pieces, CLSTR("Picture|world/bottom-bar/icons/spellbook"));
+		lt_json_t* botbar_stats = lt_json_find_child(pieces, CLSTR("Picture|world/bottom-bar/icons/stats"));
+
+		u8 lstate = retro_state;
 
 		if (lt_json_find_child(pieces, CLSTR("Label|character-select/title")))
 			retro_state = RETRO_CHARSEL;
 		else if (logout) {
 			lstr_t inv_img_slug = lt_json_find_child(botbar_inv, CLSTR("imageSourceSlug"))->str_val;
 			lstr_t spellb_img_slug = lt_json_find_child(botbar_spellb, CLSTR("imageSourceSlug"))->str_val;
+			lstr_t stats_img_slug = lt_json_find_child(botbar_stats, CLSTR("imageSourceSlug"))->str_val;
 
 			if (lt_lstr_eq(inv_img_slug, CLSTR("bottom-bar-icons/inventory/selected")))
 				retro_state = RETRO_INVENTORY;
 			else if (lt_lstr_eq(spellb_img_slug, CLSTR("bottom-bar-icons/spellbook/selected")))
 				retro_state = RETRO_SPELLBOOK;
+			else if (lt_lstr_eq(stats_img_slug, CLSTR("bottom-bar-icons/stats/selected")))
+				retro_state = RETRO_STATS;
 			else
 				retro_state = RETRO_WORLD;
 		}
 		else
 			LT_ASSERT_NOT_REACHED();
+
+		if (lstate != retro_state) {
+			if (retro_state == RETRO_WORLD || retro_state == RETRO_STATS)
+				send_key(arena, 'c');
+			else if (retro_state == RETRO_INVENTORY)
+				send_key(arena, 'x');
+			else if (retro_state == RETRO_SPELLBOOK)
+				send_key(arena, 'z');
+		}
 
 // 		lt_json_print(lt_stdout, it->next);
 
@@ -543,7 +618,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				}
 			}
 		}
-		else if (retro_state == RETRO_WORLD || retro_state == RETRO_INVENTORY || retro_state == RETRO_SPELLBOOK) {
+		else if (logout) {
 			if (cmd == CMD_SWITCH_CHAR || cmd == CMD_GET_CHARS) {
 				int x = lt_json_int_val(lt_json_find_child(logout, CLSTR("x")));
 				int y = lt_json_int_val(lt_json_find_child(logout, CLSTR("y")));
@@ -621,37 +696,43 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				inv_items[slot_id].len = name.len;
 				memcpy(inv_item_names[slot_id], name.str, name.len);
 			}
+			else if (lt_lstr_startswith(piece_it->key, CLSTR("Chest|"))) {
+				usz pfx_len = CLSTR("Chest|").len;
+				lstr_t slug = LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len);
+
+				isz chest_index = find_chest_index(slug);
+				LT_ASSERT(chest_index >= 0);
+
+				lt_json_t* opened_at = lt_json_find_child(piece_it, CLSTR("openedAt"));
+				if (opened_at->stype != LT_JSON_NULL)
+					chests[chest_index].opened_at = lt_json_int_val(opened_at);;
+			}
 			piece_it = piece_it->next;
 		}
 
-		lt_json_t* chats = lt_json_find_child(it->next, CLSTR("chats"));
-		lt_json_t* chat_it = chats->child;
+		chat_it = chats->child;
 		while (chat_it) {
 			lstr_t type = lt_json_find_child(chat_it, CLSTR("type"))->str_val;
 			lstr_t player_slug = lt_json_find_child(chat_it, CLSTR("playerSlug"))->str_val;
 
-			char* chat_buf = lt_arena_reserve(arena, 0);
-			usz chat_len = 0;
-
+			lstr_t msg_str = NLSTR();
 			if (lt_lstr_eq(type, CLSTR("message"))) {
 				lstr_t username = find_player_from_slug(player_slug)->username;
 				lstr_t msg = lt_json_find_child(chat_it, CLSTR("contents"))->str_val;
 // 				lstr_t channel = lt_json_find_child(chat_it, CLSTR("channel"))->str_val;
-				chat_len = lt_str_printf(chat_buf, "[%S] %S", username, msg);
+				msg_str = asprintf(arena, "[%S] %S", username, msg);
 			}
 			else if (lt_lstr_eq(type, CLSTR("login"))) {
 				lstr_t username = find_player_from_slug(player_slug)->username;
-				chat_len = lt_str_printf(chat_buf, "%S has logged in", username);
-			}
-			else if (lt_lstr_eq(type, CLSTR("logout"))) {
-// 				chat_len = lt_str_printf(chat_buf, "%S has logged out", username);
-				continue;
+				msg_str = asprintf(arena, "%S has logged in", username);
 			}
 
-			chat_msgs[chat_msg_count].str = malloc(chat_len);
-			chat_msgs[chat_msg_count].len = chat_len;
-			memcpy(chat_msgs[chat_msg_count].str, chat_buf, chat_len);
-			chat_msg_count++;
+			if (msg_str.len) {
+				chat_msgs[chat_msg_count].str = malloc(msg_str.len);
+				chat_msgs[chat_msg_count].len = msg_str.len;
+				memcpy(chat_msgs[chat_msg_count].str, msg_str.str, msg_str.len);
+				chat_msg_count++;
+			}
 
 			chat_it = chat_it->next;
 		}
@@ -666,7 +747,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 		last_pageid = charsel_pageid;
 
-		lt_spinlock_release(&state_lock);
+		lt_mutex_release(state_lock);
 	}
 	else {
 		lt_werrf("Unknown or invalid message type '%S'\n", it->str_val);
@@ -768,29 +849,54 @@ done:
 closed:
 }
 
+void draw_npc(float scr_x, float scr_y, float scr_tilew, int tex, u8 dir) {
+	glBindTexture(GL_TEXTURE_2D, tex);
+
+	float uv_x = 0.0f;
+	float uv_y = 0.25f * dir;
+
+	glBegin(GL_QUADS);
+	glTexCoord2f(uv_x, uv_y); glVertex2f(scr_x, scr_y);
+	glTexCoord2f(uv_x + 0.25f, uv_y); glVertex2f(scr_x + scr_tilew, scr_y);
+	glTexCoord2f(uv_x + 0.25f, uv_y + 0.25f); glVertex2f(scr_x + scr_tilew, scr_y + scr_tilew);
+	glTexCoord2f(uv_x, uv_y + 0.25f); glVertex2f(scr_x, scr_y + scr_tilew);
+	glEnd();
+}
+
 void draw_tile(tilemap_t* tilemap, float scr_x, float scr_y, float scr_tilew, u16 tile) {
 	tileset_t* tileset = tilemap_lookup_index(tilemap, &tile);
 	LT_ASSERT(tileset);
 
 	glBindTexture(GL_TEXTURE_2D, tileset->texture);
 
-	glBegin(GL_QUADS);
-
 	float ts_tilew = 1.0f / tileset->width;
 	float ts_tileh = 1.0f / tileset->height;
 	float ts_x = (tile % tileset->width) * ts_tilew;
 	float ts_y = (tile / tileset->width) * ts_tileh;
 
+	glBegin(GL_QUADS);
 	glTexCoord2f(ts_x, ts_y); glVertex2f(scr_x, scr_y);
 	glTexCoord2f(ts_x + ts_tilew, ts_y); glVertex2f(scr_x + scr_tilew, scr_y);
 	glTexCoord2f(ts_x + ts_tilew, ts_y + ts_tileh); glVertex2f(scr_x + scr_tilew, scr_y + scr_tilew);
 	glTexCoord2f(ts_x, ts_y + ts_tileh); glVertex2f(scr_x, scr_y + scr_tilew);
+	glEnd();
+}
 
+void draw_sprite(float x, float y, float w, float h, int tex) {
+	glBindTexture(GL_TEXTURE_2D, tex);
+
+	glBegin(GL_QUADS);
+	glTexCoord2f(0.0f, 0.0f); glVertex2f(x, y);
+	glTexCoord2f(1.0f, 0.0f); glVertex2f(x + w, y);
+	glTexCoord2f(1.0f, 1.0f); glVertex2f(x + w, y + h);
+	glTexCoord2f(0.0f, 1.0f); glVertex2f(x, y + h);
 	glEnd();
 }
 
 int main(int argc, char** argv) {
 	arena = lt_arena_alloc(LT_MB(16));
+
+	state_lock = lt_mutex_create(arena);
 
 	if (!lt_window_init(arena))
 		lt_ferrf("Failed to connect to window server\n");
@@ -1004,7 +1110,7 @@ int main(int argc, char** argv) {
 		int width, height;
 		lt_window_get_size(win, &width, &height);
 
-		lt_spinlock_lock(&state_lock);
+		lt_mutex_lock(state_lock);
 
 		if (lt_window_key_pressed(win, LT_KEY_W))
 			send_key_down(arena, 'w');
@@ -1080,7 +1186,7 @@ int main(int argc, char** argv) {
 		render_scissor(NULL, &game_area);
 
 		tilemap_t* tilemap = players[local_playerid].tilemap;
-		if (tilemap) {
+		if (tilemap && cmd != CMD_GET_CHARS && cmd != CMD_SWITCH_CHAR) {
 			float scr_tilew = 32.0f;
 			float scr_tileoffs_x = game_area.x - (players[local_playerid].x * scr_tilew) + game_area.w/2 - scr_tilew/2;
 			float scr_tileoffs_y = game_area.y - (players[local_playerid].y * scr_tilew) + game_area.h/2 - scr_tilew/2;
@@ -1099,17 +1205,49 @@ int main(int argc, char** argv) {
 						draw_tile(tilemap, scr_x, scr_y, scr_tilew, tile);
 					}
 
-					i16 chest = tilemap->chest_indices[x * tilemap->h + y];
-					if (chest >= 0)
-						draw_tile(tilemap, scr_x, scr_y, scr_tilew, chest);
+					i16 chest_index = tilemap->chest_indices[x * tilemap->h + y];
+					if (chest_index >= 0) {
+						tileset_t* ts = tilemap_lookup_index(tilemap, &chest_index);
+						chest_t* chest = &chests[ts->chests[chest_index]];
 
-					i16 bank = tilemap->bank_indices[x * tilemap->h + y];
-					if (bank >= 0)
-						draw_tile(tilemap, scr_x, scr_y, scr_tilew, bank);
+						glBindTexture(GL_TEXTURE_2D, chest->texture);
 
-					i16 npc = tilemap->npc_indices[x * tilemap->h + y];
-					if (npc >= 0)
-						draw_tile(tilemap, scr_x, scr_y, scr_tilew, npc);
+						float uv_x = 0.0f;
+
+						if (chest->opened_at != -1)
+							uv_x += 0.5f;
+
+						glBegin(GL_QUADS);
+						glTexCoord2f(uv_x, 0.0f); glVertex2f(scr_x, scr_y);
+						glTexCoord2f(0.25f, 0.0f); glVertex2f(scr_x + scr_tilew, scr_y);
+						glTexCoord2f(0.25f, 1.0f); glVertex2f(scr_x + scr_tilew, scr_y + scr_tilew);
+						glTexCoord2f(uv_x, 1.0f); glVertex2f(scr_x, scr_y + scr_tilew);
+						glEnd();
+					}
+
+					i16 bank_index = tilemap->bank_indices[x * tilemap->h + y];
+					if (bank_index >= 0) {
+						tileset_t* ts = tilemap_lookup_index(tilemap, &bank_index);
+						bank_t* bank = &banks[ts->banks[bank_index]];
+
+						glBindTexture(GL_TEXTURE_2D, bank->texture);
+
+						glBegin(GL_QUADS);
+						glTexCoord2f(0.0f, 0.0f); glVertex2f(scr_x, scr_y);
+						glTexCoord2f(0.25f, 0.0f); glVertex2f(scr_x + scr_tilew, scr_y);
+						glTexCoord2f(0.25f, 1.0f); glVertex2f(scr_x + scr_tilew, scr_y + scr_tilew);
+						glTexCoord2f(0.0f, 1.0f); glVertex2f(scr_x, scr_y + scr_tilew);
+						glEnd();
+					}
+
+					i16 npc_index = tilemap->npc_indices[x * tilemap->h + y];
+					if (npc_index >= 0) {
+						tileset_t* ts = tilemap_lookup_index(tilemap, &npc_index);
+						npc_t* npc = &npcs[ts->npcs[npc_index]];
+
+						draw_npc(scr_x, scr_y, scr_tilew, npc->texture, DIR_UP);
+						draw_sprite(scr_x, scr_y - scr_tilew, scr_tilew, scr_tilew, npc->indicator_texture);
+					}
 				}
 			}
 			glDisable(GL_TEXTURE_2D);
@@ -1147,7 +1285,7 @@ int main(int argc, char** argv) {
 			glDisable(GL_TEXTURE_2D);
 		}
 
-		lt_spinlock_release(&state_lock);
+		lt_mutex_release(state_lock);
 
 		render_end(win);
 	}
