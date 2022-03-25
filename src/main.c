@@ -24,6 +24,7 @@
 #define USERSLUG_MAXLEN 21
 
 typedef struct tilemap tilemap_t;
+typedef struct player player_t;
 
 lt_arena_t* arena = NULL;
 lt_socket_t* sock = NULL;
@@ -33,7 +34,7 @@ lt_font_t* font = NULL;
 int icons[LT_GUI_ICON_MAX];
 int glyph_bm;
 
-int local_playerid = 0;
+player_t* local_player = NULL;
 
 #define DIR_DOWN	0
 #define DIR_LEFT	1
@@ -213,9 +214,21 @@ player_t* find_player_from_slug(lstr_t slug) {
 		if (lt_lstr_eq(slug, players[i].slug))
 			return &players[i];
 
-	LT_ASSERT_NOT_REACHED();
 	return NULL;
 }
+
+player_t* new_player(lstr_t slug, lstr_t username) {
+	memset(&players[player_count], 0, sizeof(player_t));
+
+	memcpy(player_slugs[player_count], slug.str, slug.len);
+	players[player_count].slug = LSTR(player_slugs[player_count], slug.len);
+
+	memcpy(player_usernames[player_count], username.str, username.len);
+	players[player_count].username = LSTR(player_usernames[player_count], username.len);
+
+	return &players[player_count++];
+}
+
 
 tilemap_t* find_tilemap(lstr_t slug) {
 	for (usz i = 0; i < tilemap_count; ++i)
@@ -601,10 +614,22 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		lt_printf("Successfully connected to '%s'\n", HOST);
 	}
 	else if (lt_lstr_eq(it->str_val, CLSTR("update"))) {
-// 		static u64 ltime = 0;
-// 		u64 time = lt_hfreq_time_msec();
-// 		lt_printf("Update %udms\n", time - ltime);
-// 		ltime = time;
+		static double delta_total = 0.0f;
+		static usz delta_count = 0;
+
+		static u64 ltime = 0;
+		u64 time = lt_hfreq_time_usec();
+		u64 time_msec = time/1000;
+		u64 delta_usec = time - ltime;
+		u64 delta_msec = delta_usec/1000;
+		double delta_avg_usec = delta_total/(double)delta_count;
+		u64 delta_avg_msec = round(delta_avg_usec/1000);
+		if (ltime) {
+			delta_total += (double)delta_usec;
+			++delta_count;
+			lt_printf("Delta %uqms, avg. %uqms\n", delta_msec, delta_avg_msec);
+		}
+		ltime = time;
 
 		lt_mutex_lock(state_lock);
 		send_begin();
@@ -740,51 +765,49 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				lstr_t slug = LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len);
 				lstr_t username = lt_json_find_child(piece_it, CLSTR("username"))->str_val;
 
-				memcpy(player_slugs[player_count], slug.str, slug.len);
-				memcpy(player_usernames[player_count], username.str, username.len);
-
-				players[player_count].username = LSTR(player_usernames[player_count], username.len);
-				players[player_count].slug = LSTR(player_slugs[player_count], slug.len);
+				player_t* player = find_player_from_slug(slug);
+				if (!player) {
+					player = new_player(slug, username);
+					if (!local_player && lt_lstr_eq(slug, local_player_slug))
+						local_player = player;
+				}
 
 				lt_json_t* tilemap_js = lt_json_find_child(piece_it, CLSTR("tilemapSlug"));
 				if (tilemap_js->stype == LT_JSON_STRING)
-					players[player_count].tilemap = find_tilemap(tilemap_js->str_val);
+					player->tilemap = find_tilemap(tilemap_js->str_val);
 				else
-					players[player_count].tilemap = NULL;
-
-				if (lt_lstr_eq(slug, local_player_slug))
-					local_playerid = player_count;
+					player->tilemap = NULL;
 
 				lt_json_t* x_js = lt_json_find_child(piece_it, CLSTR("x"));
 				lt_json_t* y_js = lt_json_find_child(piece_it, CLSTR("y"));
 				if (x_js->stype != LT_JSON_NULL && y_js->stype != LT_JSON_NULL) {
-					players[player_count].x = lt_json_int_val(x_js);
-					players[player_count].y = lt_json_int_val(y_js);
+					player->x = lt_json_int_val(x_js);
+					player->y = lt_json_int_val(y_js);
 				}
 
 				lt_json_t* dir_js = lt_json_find_child(piece_it, CLSTR("direction"));
 				if (dir_js->stype != LT_JSON_NULL)
-					players[player_count].direction = find_direction(dir_js->str_val);
+					player->direction = find_direction(dir_js->str_val);
 
 				lt_json_t* mask_js = lt_json_find_child(piece_it, CLSTR("maskItemSlug"));
 				if (mask_js->stype != LT_JSON_NULL)
-					players[player_count].mask = find_mask(mask_js->str_val);
+					player->mask = find_mask(mask_js->str_val);
 				else
-					players[player_count].mask = NULL;
+					player->mask = NULL;
 
 				lt_json_t* outfit_js = lt_json_find_child(piece_it, CLSTR("outfitItemSlug"));
 				if (outfit_js->stype != LT_JSON_NULL)
-					players[player_count].outfit = find_outfit(outfit_js->str_val);
+					player->outfit = find_outfit(outfit_js->str_val);
 				else
-					players[player_count].outfit = NULL;
+					player->outfit = NULL;
 
 				lt_json_t* wstart_js = lt_json_find_child(piece_it, CLSTR("sinceWalkAnimationStarted"));
-				if (wstart_js->stype != LT_JSON_NULL)
-					players[player_count].walk_start = lt_json_int_val(wstart_js);
+				if (wstart_js->stype != LT_JSON_NULL) {
+					if (time_msec - player->walk_start > MOVESPEED - delta_avg_msec)
+						player->walk_start = time_msec - lt_json_int_val(wstart_js);
+				}
 				else
-					players[player_count].walk_start = MOVESPEED;
-
-				player_count++;
+					player->walk_start = time_msec - MOVESPEED*2;
 			}
 			else if (cmd == CMD_GET_CHARS && lt_lstr_startswith(piece_it->key, CLSTR("Label|character-select/character/"))) {
 				usz pfx_len = CLSTR("Label|character-select/character/").len;
@@ -1299,137 +1322,145 @@ int main(int argc, char** argv) {
 
 		lt_mutex_lock(state_lock);
 		send_begin();
-		tilemap_t* tilemap = players[local_playerid].tilemap;
+		tilemap_t* tilemap = local_player ? local_player->tilemap : NULL;
 
 		u64 time_msec = lt_hfreq_time_msec();
 
-		static i64 w_pressed_msec = -1;
-		static i64 a_pressed_msec = -1;
-		static i64 s_pressed_msec = -1;
-		static i64 d_pressed_msec = -1;
-
 		static isz predict_x = 0;
 		static isz predict_y = 0;
-
-		for (usz i = 0; i < ev_count; ++i) {
-			lt_window_event_t ev = evs[i];
-
-			switch (ev.type) {
-			case LT_WIN_EVENT_KEY_PRESS:
-				if (ev.key == LT_KEY_W)
-					w_pressed_msec = time_msec;
-				else if (ev.key == LT_KEY_A)
-					a_pressed_msec = time_msec;
-				else if (ev.key == LT_KEY_S)
-					s_pressed_msec = time_msec;
-				else if (ev.key == LT_KEY_D)
-					d_pressed_msec = time_msec;
-				break;
-
-			case LT_WIN_EVENT_KEY_RELEASE:
-				if (ev.key == LT_KEY_W)
-					w_pressed_msec = -1;
-				else if (ev.key == LT_KEY_A)
-					a_pressed_msec = -1;
-				else if (ev.key == LT_KEY_S)
-					s_pressed_msec = -1;
-				else if (ev.key == LT_KEY_D)
-					d_pressed_msec = -1;
-				break;
-
-			default:
-				break;
-			}
-		}
-
 		static i8 predict_move_dir = -1;
-		static u64 walk_start_msec = 0;
+		float predict_step_len = 0.0f;
 
-		i8 move_dir = -1;
-		u64 move_pressed_msec = 0;
-		if (w_pressed_msec != -1) {
-			move_dir = DIR_UP;
-			move_pressed_msec = w_pressed_msec;
-		}
-		if (a_pressed_msec != -1 && a_pressed_msec > move_pressed_msec) {
-			move_dir = DIR_LEFT;
-			move_pressed_msec = a_pressed_msec;
-		}
-		if (s_pressed_msec != -1 && s_pressed_msec > move_pressed_msec) {
-			move_dir = DIR_DOWN;
-			move_pressed_msec = s_pressed_msec;
-		}
-		if (d_pressed_msec != -1 && d_pressed_msec > move_pressed_msec) {
-			move_dir = DIR_RIGHT;
-			move_pressed_msec = d_pressed_msec;
-		}
+		if (tilemap && local_player) {
+			static i64 w_pressed_msec = -1;
+			static i64 a_pressed_msec = -1;
+			static i64 s_pressed_msec = -1;
+			static i64 d_pressed_msec = -1;
 
-		static u64 walk_anim_start_msec = 0;
-		static b8 mkeyup_sent = 1;
+			for (usz i = 0; i < ev_count; ++i) {
+				lt_window_event_t ev = evs[i];
 
-		u64 walk_time_delta = time_msec - walk_start_msec;
-
-		if (walk_time_delta > MOVESPEED && !mkeyup_sent) {
-			send_key_up("w");
-			send_key_up("a");
-			send_key_up("s");
-			send_key_up("d");
-			mkeyup_sent = 1;
-		}
-
-		if (walk_time_delta > MOVESPEED) {
-			usz prediction_diff = abs(predict_x - players[local_playerid].x) + abs(predict_y - players[local_playerid].y);
-
-			if (move_dir != -1 && prediction_diff <= 1) {
-				predict_move_dir = move_dir;
-
-				switch (move_dir) {
-				case DIR_UP:
-					if (!collide_at(tilemap, predict_x, predict_y - 1)) {
-						--predict_y;
-						walk_anim_start_msec = time_msec;
-						walk_start_msec = time_msec;
-						send_key_down("w");
-						mkeyup_sent = 0;
-					}
+				switch (ev.type) {
+				case LT_WIN_EVENT_KEY_PRESS:
+					if (ev.key == LT_KEY_W)
+						w_pressed_msec = time_msec;
+					else if (ev.key == LT_KEY_A)
+						a_pressed_msec = time_msec;
+					else if (ev.key == LT_KEY_S)
+						s_pressed_msec = time_msec;
+					else if (ev.key == LT_KEY_D)
+						d_pressed_msec = time_msec;
 					break;
-				case DIR_LEFT:
-					if (!collide_at(tilemap, predict_x - 1, predict_y)) {
-						--predict_x;
-						walk_anim_start_msec = time_msec;
-						walk_start_msec = time_msec;
-						send_key_down("a");
-						mkeyup_sent = 0;
-					}
+
+				case LT_WIN_EVENT_KEY_RELEASE:
+					if (ev.key == LT_KEY_W)
+						w_pressed_msec = -1;
+					else if (ev.key == LT_KEY_A)
+						a_pressed_msec = -1;
+					else if (ev.key == LT_KEY_S)
+						s_pressed_msec = -1;
+					else if (ev.key == LT_KEY_D)
+						d_pressed_msec = -1;
 					break;
-				case DIR_DOWN:
-					if (!collide_at(tilemap, predict_x, predict_y + 1)) {
-						++predict_y;
-						walk_anim_start_msec = time_msec;
-						walk_start_msec = time_msec;
-						send_key_down("s");
-						mkeyup_sent = 0;
-					}
-					break;
-				case DIR_RIGHT:
-					if (!collide_at(tilemap, predict_x + 1, predict_y)) {
-						++predict_x;
-						walk_anim_start_msec = time_msec;
-						walk_start_msec = time_msec;
-						send_key_down("d");
-						mkeyup_sent = 0;
-					}
+
+				default:
 					break;
 				}
 			}
-			else {
-				predict_move_dir = players[local_playerid].direction;
-				predict_x = players[local_playerid].x;
-				predict_y = players[local_playerid].y;
-			}
-		}
 
-		float predict_step_len = 1.0f - ((float)(time_msec - walk_anim_start_msec) / MOVESPEED);
+			static u64 walk_start_msec = 0;
+
+			i8 move_dir = -1;
+			u64 move_pressed_msec = 0;
+			if (w_pressed_msec != -1) {
+				move_dir = DIR_UP;
+				move_pressed_msec = w_pressed_msec;
+			}
+			if (a_pressed_msec != -1 && a_pressed_msec > move_pressed_msec) {
+				move_dir = DIR_LEFT;
+				move_pressed_msec = a_pressed_msec;
+			}
+			if (s_pressed_msec != -1 && s_pressed_msec > move_pressed_msec) {
+				move_dir = DIR_DOWN;
+				move_pressed_msec = s_pressed_msec;
+			}
+			if (d_pressed_msec != -1 && d_pressed_msec > move_pressed_msec) {
+				move_dir = DIR_RIGHT;
+				move_pressed_msec = d_pressed_msec;
+			}
+
+			static u64 walk_anim_start_msec = 0;
+
+			u64 walk_time_delta = time_msec - walk_start_msec;
+
+			static u64 mkeyup_delay = 0;
+			if (mkeyup_delay && walk_time_delta > mkeyup_delay) {
+				send_key_up("w");
+				send_key_up("a");
+				send_key_up("s");
+				send_key_up("d");
+				mkeyup_delay = 0;
+			}
+
+			if (walk_time_delta > MOVESPEED) {
+				usz prediction_diff = abs(predict_x - local_player->x) + abs(predict_y - local_player->y);
+
+				if (prediction_diff > 1) {
+					predict_move_dir = local_player->direction;
+					predict_x = local_player->x;
+					predict_y = local_player->y;
+				}
+
+				if (move_dir != -1) {
+					predict_move_dir = move_dir;
+
+					switch (move_dir) {
+					case DIR_UP:
+						send_key_down("w");
+						mkeyup_delay = 10;
+						if (!collide_at(tilemap, predict_x, predict_y - 1)) {
+							--predict_y;
+							walk_anim_start_msec = time_msec;
+							walk_start_msec = time_msec;
+							mkeyup_delay = MOVESPEED;
+						}
+						break;
+					case DIR_LEFT:
+						send_key_down("a");
+						mkeyup_delay = 10;
+						if (!collide_at(tilemap, predict_x - 1, predict_y)) {
+							--predict_x;
+							walk_anim_start_msec = time_msec;
+							walk_start_msec = time_msec;
+							mkeyup_delay = MOVESPEED;
+						}
+						break;
+					case DIR_DOWN:
+						send_key_down("s");
+						mkeyup_delay = 10;
+						if (!collide_at(tilemap, predict_x, predict_y + 1)) {
+							++predict_y;
+							walk_anim_start_msec = time_msec;
+							walk_start_msec = time_msec;
+							mkeyup_delay = MOVESPEED;
+						}
+						break;
+					case DIR_RIGHT:
+						send_key_down("d");
+						mkeyup_delay = 10;
+						if (!collide_at(tilemap, predict_x + 1, predict_y)) {
+							++predict_x;
+							walk_anim_start_msec = time_msec;
+							walk_start_msec = time_msec;
+							mkeyup_delay = MOVESPEED;
+						}
+						break;
+					}
+				}
+			}
+
+			predict_step_len = 1.0f - ((float)(time_msec - walk_anim_start_msec) / MOVESPEED);
+		}
 
 		lt_gui_begin(cx, width, height);
 
@@ -1445,7 +1476,7 @@ int main(int argc, char** argv) {
 		}
 
 		lt_gui_hspace(cx, 4, 0);
-		lt_gui_label(cx, players[local_playerid].username, 0);
+		lt_gui_label(cx, local_player ? local_player->username : NLSTR(), 0);
 
 		if (lt_gui_button(cx, CLSTR("Log out"), LT_GUI_ALIGN_RIGHT | LT_GUI_BORDER_OUTSET))
 			quit = 1;
@@ -1574,12 +1605,12 @@ int main(int argc, char** argv) {
 				if (players[i].tilemap != tilemap)
 					continue;
 
-				float step_len = 1.0f - ((float)players[i].walk_start / MOVESPEED);
+				float step_len = 1.0f - ((float)(time_msec - players[i].walk_start) / MOVESPEED);
 
 				isz x = players[i].x;
 				isz y = players[i].y;
 				u8 dir = players[i].direction;
-				if (i == local_playerid) {
+				if (&players[i] == local_player) {
 					dir = predict_move_dir;
 					x = predict_x;
 					y = predict_y;
