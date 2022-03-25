@@ -1393,6 +1393,8 @@ int main(int argc, char** argv) {
 			u64 walk_time_delta = time_msec - walk_start_msec;
 
 			static u64 mkeyup_delay = 0;
+			#define WALK_KEYUP_DELAY (MOVESPEED)
+
 			if (mkeyup_delay && walk_time_delta > mkeyup_delay) {
 				send_key_up("w");
 				send_key_up("a");
@@ -1404,7 +1406,7 @@ int main(int argc, char** argv) {
 			if (walk_time_delta > MOVESPEED) {
 				usz prediction_diff = abs(predict_x - local_player->x) + abs(predict_y - local_player->y);
 
-				if (prediction_diff > 1) {
+				if (prediction_diff > 1 || (move_dir == -1 && walk_time_delta > MOVESPEED*2)) {
 					predict_move_dir = local_player->direction;
 					predict_x = local_player->x;
 					predict_y = local_player->y;
@@ -1416,42 +1418,42 @@ int main(int argc, char** argv) {
 					switch (move_dir) {
 					case DIR_UP:
 						send_key_down("w");
-						mkeyup_delay = 10;
+						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x, predict_y - 1)) {
 							--predict_y;
 							walk_anim_start_msec = time_msec;
 							walk_start_msec = time_msec;
-							mkeyup_delay = MOVESPEED;
+							mkeyup_delay = WALK_KEYUP_DELAY;
 						}
 						break;
 					case DIR_LEFT:
 						send_key_down("a");
-						mkeyup_delay = 10;
+						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x - 1, predict_y)) {
 							--predict_x;
 							walk_anim_start_msec = time_msec;
 							walk_start_msec = time_msec;
-							mkeyup_delay = MOVESPEED;
+							mkeyup_delay = WALK_KEYUP_DELAY;
 						}
 						break;
 					case DIR_DOWN:
 						send_key_down("s");
-						mkeyup_delay = 10;
+						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x, predict_y + 1)) {
 							++predict_y;
 							walk_anim_start_msec = time_msec;
 							walk_start_msec = time_msec;
-							mkeyup_delay = MOVESPEED;
+							mkeyup_delay = WALK_KEYUP_DELAY;
 						}
 						break;
 					case DIR_RIGHT:
 						send_key_down("d");
-						mkeyup_delay = 10;
+						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x + 1, predict_y)) {
 							++predict_x;
 							walk_anim_start_msec = time_msec;
 							walk_start_msec = time_msec;
-							mkeyup_delay = MOVESPEED;
+							mkeyup_delay = WALK_KEYUP_DELAY;
 						}
 						break;
 					}
