@@ -202,11 +202,11 @@ void send_pong(lt_socket_t* sock) {
 
 lt_mutex_t* state_lock;
 
-void send_chat(lt_arena_t* arena, lt_socket_t* sock, lstr_t channel, lstr_t msg) {
-	char* buf = lt_arena_reserve(arena, 0);
-	usz len = lt_str_printf(buf, "42[\"message\",{\"channel\":\"%S\",\"contents\":\"%S\"}]", channel, msg);
-	ws_send_text(sock, LSTR(buf, len));
-}
+// void send_chat(lt_arena_t* arena, lt_socket_t* sock, lstr_t channel, lstr_t msg) {
+// 	char* buf = lt_arena_reserve(arena, 0);
+// 	usz len = lt_str_printf(buf, "42[\"message\",{\"channel\":\"%S\",\"contents\":\"%S\"}]", channel, msg);
+// 	ws_send_text(sock, LSTR(buf, len));
+// }
 
 player_t* find_player_from_slug(lstr_t slug) {
 	for (usz i = 0; i < player_count; ++i)
@@ -554,32 +554,42 @@ void switch_char(u8 charid) {
 	LT_ASSERT(charid < character_count);
 }
 
-void send_click(lt_arena_t* arena, int x, int y) {
-	char* msg_buf = lt_arena_reserve(arena, 0);
-	usz msg_len = lt_str_printf(msg_buf, "42[\"mousedown\",{\"x\":%id.0,\"y\":%id.0}]", x, y);
-	ws_send_text(sock, LSTR(msg_buf, msg_len));
+usz send_len = 0;
+char send_buf[LT_MB(1)];
 
-	msg_len = lt_str_printf(msg_buf, "42[\"mouseup\",{\"x\":%id.0,\"y\":%id.0}]", x, y);
-	ws_send_text(sock, LSTR(msg_buf, msg_len));
+void send_begin(void) {
+	send_len = 0;
 }
 
-void send_key_down(lt_arena_t* arena, char key) {
-	char* msg_buf = lt_arena_reserve(arena, 0);
-	usz msg_len = lt_str_printf(msg_buf, "42[\"keydown\",\"%c\"]", key);
-	ws_send_text(sock, LSTR(msg_buf, msg_len));
-// 	lt_printf("%S\n", LSTR(msg_buf, msg_len));
+void send_end(void) {
+	if (send_len)
+		lt_socket_send(sock, send_buf, send_len);
 }
 
-void send_key_up(lt_arena_t* arena, char key) {
-	char* msg_buf = lt_arena_reserve(arena, 0);
-	usz msg_len = lt_str_printf(msg_buf, "42[\"keyup\",\"%c\"]", key);
-	ws_send_text(sock, LSTR(msg_buf, msg_len));
-// 	lt_printf("%S\n", LSTR(msg_buf, msg_len));
+void send_click(int x, int y) {
+	char tmp[32];
+	usz nlen = lt_str_printiq(tmp, x) + lt_str_printiq(tmp, y);
+
+	send_len += ws_write_frame_start(&send_buf[send_len], WS_FIN | WS_TEXT, CLSTR("42[\"mousedown\",{\"x\":.0,\"y\":.0}]").len + nlen);
+	send_len += lt_str_printf(&send_buf[send_len], "42[\"mousedown\",{\"x\":%id.0,\"y\":%id.0}]", x, y);
+	send_len += ws_write_frame_start(&send_buf[send_len], WS_FIN | WS_TEXT, CLSTR("42[\"mouseup\",{\"x\":.0,\"y\":.0}]").len + nlen);
+	send_len += lt_str_printf(&send_buf[send_len], "42[\"mouseup\",{\"x\":%id.0,\"y\":%id.0}]", x, y);
 }
 
-void send_key(lt_arena_t* arena, char key) {
-	send_key_down(arena, key);
-	send_key_up(arena, key);
+
+void send_key_down(char* key) {
+	send_len += ws_write_frame_start(&send_buf[send_len], WS_FIN | WS_TEXT, CLSTR("42[\"keydown\",\"\"]").len + strlen(key));
+	send_len += lt_str_printf(&send_buf[send_len], "42[\"keydown\",\"%s\"]", key);
+}
+
+void send_key_up(char* key) {
+	send_len += ws_write_frame_start(&send_buf[send_len], WS_FIN | WS_TEXT, CLSTR("42[\"keyup\",\"\"]").len + strlen(key));
+	send_len += lt_str_printf(&send_buf[send_len], "42[\"keyup\",\"%s\"]", key);
+}
+
+void send_key(char* key) {
+	send_key_down(key);
+	send_key_up(key);
 }
 
 #include <lt/time.h>
@@ -597,6 +607,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 // 		ltime = time;
 
 		lt_mutex_lock(state_lock);
+		send_begin();
 
 		lt_json_t* chats = lt_json_find_child(it->next, CLSTR("chats"));
 		lt_json_t* chat_it = chats->child;
@@ -698,7 +709,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				int x = lt_json_int_val(lt_json_find_child(play, CLSTR("x")));
 				int y = lt_json_int_val(lt_json_find_child(play, CLSTR("y")));
 
-				send_click(arena, x + 1, y + 1);
+				send_click(x + 1, y + 1);
 
  				sel_charid = cmd_charid;
  				cmd = 0;
@@ -708,7 +719,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 			else if (cmd == CMD_GET_CHARS || (cmd == CMD_SWITCH_CHAR && charsel_pageid != characters[cmd_charid].page)) {
 				if (!awaiting_pageswitch) {
 					lt_printf("Sending 'next page' click on page %ud\n", charsel_pageid);
-					send_click(arena, 223, 203);
+					send_click(223, 203);
 					awaiting_pageswitch = 1;
 				}
 			}
@@ -718,7 +729,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				int x = lt_json_int_val(lt_json_find_child(logout, CLSTR("x")));
 				int y = lt_json_int_val(lt_json_find_child(logout, CLSTR("y")));
 
-				send_click(arena, x + 1, y + 1);
+				send_click(x + 1, y + 1);
 			}
 		}
 
@@ -875,6 +886,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 		last_pageid = charsel_pageid;
 
+		send_end();
 		lt_mutex_release(state_lock);
 	}
 	else {
@@ -918,11 +930,11 @@ void recv_thread_proc(void* usr) {
 		usz payload_len = frame[1] & 0x7F;
 
 		if (payload_len == 126) {
-			recv_fixed(sock, frame, 2);
+			LT_ASSERT(recv_fixed(sock, frame, 2) > 0);
 			payload_len = frame[1] | (frame[0] << 8);
 		}
 		else if (payload_len == 127) {
-			recv_fixed(sock, frame, 8);
+			LT_ASSERT(recv_fixed(sock, frame, 8) > 0);
 			payload_len = (u64)frame[7] | ((u64)frame[6] << 8) | ((u64)frame[5] << 16) | ((u64)frame[4] << 24) |
 					 ((u64)frame[3] << 32) | ((u64)frame[2] << 40) | ((u64)frame[1] << 48) | ((u64)frame[0] << 56);
 		}
@@ -931,7 +943,7 @@ void recv_thread_proc(void* usr) {
 
 		char* payload = lt_arena_reserve(arena, payload_len);
 
-		recv_fixed(sock, payload, payload_len);
+		LT_ASSERT(recv_fixed(sock, payload, payload_len) > 0);
 
 		if (payload_len < 1)
 			goto done;
@@ -1286,6 +1298,7 @@ int main(int argc, char** argv) {
 		lt_window_get_size(win, &width, &height);
 
 		lt_mutex_lock(state_lock);
+		send_begin();
 		tilemap_t* tilemap = players[local_playerid].tilemap;
 
 		u64 time_msec = lt_hfreq_time_msec();
@@ -1352,18 +1365,22 @@ int main(int argc, char** argv) {
 		}
 
 		static u64 walk_anim_start_msec = 0;
+		static b8 mkeyup_sent = 1;
 
 		u64 walk_time_delta = time_msec - walk_start_msec;
 
-		if (walk_time_delta > 125) { // Wait at least 125ms before sending the WASD keyups.
-			send_key_up(arena, 'w'); // The server just ignores the entire key press otherwise.
-			send_key_up(arena, 'a'); // (For some damn reason?)
-			send_key_up(arena, 's');
-			send_key_up(arena, 'd');
+		if (walk_time_delta > MOVESPEED && !mkeyup_sent) {
+			send_key_up("w");
+			send_key_up("a");
+			send_key_up("s");
+			send_key_up("d");
+			mkeyup_sent = 1;
 		}
 
 		if (walk_time_delta > MOVESPEED) {
-			if (move_dir != -1) {
+			usz prediction_diff = abs(predict_x - players[local_playerid].x) + abs(predict_y - players[local_playerid].y);
+
+			if (move_dir != -1 && prediction_diff <= 1) {
 				predict_move_dir = move_dir;
 
 				switch (move_dir) {
@@ -1372,7 +1389,8 @@ int main(int argc, char** argv) {
 						--predict_y;
 						walk_anim_start_msec = time_msec;
 						walk_start_msec = time_msec;
-						send_key_down(arena, 'w');
+						send_key_down("w");
+						mkeyup_sent = 0;
 					}
 					break;
 				case DIR_LEFT:
@@ -1380,7 +1398,8 @@ int main(int argc, char** argv) {
 						--predict_x;
 						walk_anim_start_msec = time_msec;
 						walk_start_msec = time_msec;
-						send_key_down(arena, 'a');
+						send_key_down("a");
+						mkeyup_sent = 0;
 					}
 					break;
 				case DIR_DOWN:
@@ -1388,7 +1407,8 @@ int main(int argc, char** argv) {
 						++predict_y;
 						walk_anim_start_msec = time_msec;
 						walk_start_msec = time_msec;
-						send_key_down(arena, 's');
+						send_key_down("s");
+						mkeyup_sent = 0;
 					}
 					break;
 				case DIR_RIGHT:
@@ -1396,7 +1416,8 @@ int main(int argc, char** argv) {
 						++predict_x;
 						walk_anim_start_msec = time_msec;
 						walk_start_msec = time_msec;
-						send_key_down(arena, 'd');
+						send_key_down("d");
+						mkeyup_sent = 0;
 					}
 					break;
 				}
@@ -1626,6 +1647,7 @@ int main(int argc, char** argv) {
 			}
 		}
 
+		send_end();
 		lt_mutex_release(state_lock);
 
 		render_end(win);

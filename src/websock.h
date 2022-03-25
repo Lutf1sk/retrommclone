@@ -15,9 +15,12 @@
 
 #define WS_FIN 0x80
 
+#define WS_FRAME_MAX 0x20
+
 #include <lt/fwd.h>
 #include <lt/lt.h>
 
+usz ws_write_frame_start(void* out, u8 op, usz len);
 void ws_send_frame_start(lt_socket_t* sock, u8 op, usz len);
 void ws_send_text(lt_socket_t* sock, lstr_t data);
 
