@@ -766,11 +766,10 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				lstr_t username = lt_json_find_child(piece_it, CLSTR("username"))->str_val;
 
 				player_t* player = find_player_from_slug(slug);
-				if (!player) {
+				if (!player)
 					player = new_player(slug, username);
-					if (!local_player && lt_lstr_eq(slug, local_player_slug))
-						local_player = player;
-				}
+				if (lt_lstr_eq(slug, local_player_slug))
+					local_player = player;
 
 				lt_json_t* tilemap_js = lt_json_find_child(piece_it, CLSTR("tilemapSlug"));
 				if (tilemap_js->stype == LT_JSON_STRING)
