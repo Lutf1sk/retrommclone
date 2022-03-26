@@ -166,6 +166,9 @@ struct tileset {
 	lstr_t name;
 	b8* collisions;
 	i8* chests, *banks, *npcs;
+	u8* frame_counts;
+	u16** frames;
+
 	usz tile_count;
 	usz width;
 	usz height;
@@ -386,6 +389,9 @@ tileset_t* tileset_add(lt_arena_t* arena, lt_json_t* json) {
 	i8* banks = lt_arena_reserve(arena, tile_count * sizeof(i8));
 	i8* npcs = lt_arena_reserve(arena, tile_count * sizeof(i8));
 
+	u8* frame_counts = lt_arena_reserve(arena, tile_count * sizeof(u8));
+	u16** frames = lt_arena_reserve(arena, tile_count * sizeof(u16*));
+
 	usz x = 0;
 	while (it) {
 		lt_json_t* tile_it = it->child;
@@ -397,6 +403,17 @@ tileset_t* tileset_add(lt_arena_t* arena, lt_json_t* json) {
 			lstr_t bankslug = lt_json_find_child(tile_it, CLSTR("bankSlug"))->str_val;
 			lstr_t chestslug = lt_json_find_child(tile_it, CLSTR("chestSlug"))->str_val;
 			lstr_t npcslug = lt_json_find_child(tile_it, CLSTR("npcSlug"))->str_val;
+
+			lt_json_t* anim_frames = lt_json_find_child(tile_it, CLSTR("animationFrames"));
+			if (anim_frames->child_count) {
+				frame_counts[index] = anim_frames->child_count;
+				frames[index] = lt_arena_reserve(arena, anim_frames->child_count * sizeof(u16) * 2);
+				usz i = 0;
+				for (lt_json_t* it = anim_frames->child; it; it = it->next) {
+					frames[index][i++] = lt_json_uint_val(lt_json_find_child(it, CLSTR("duration")));
+					frames[index][i++] = lt_json_uint_val(lt_json_find_child(it, CLSTR("index")));
+				}
+			}
 
 			if (chestslug.len)
 				chests[index] = find_chest_index(chestslug);
@@ -433,6 +450,8 @@ tileset_t* tileset_add(lt_arena_t* arena, lt_json_t* json) {
 	tilesets[tileset_count].tile_count = tile_count;
 	tilesets[tileset_count].width = cols;
 	tilesets[tileset_count].height = rows;
+	tilesets[tileset_count].frame_counts = frame_counts;
+	tilesets[tileset_count].frames = frames;
 	tilesets[tileset_count].collisions = collision;
 	tilesets[tileset_count].chests = chests;
 	tilesets[tileset_count].banks = banks;
@@ -556,6 +575,9 @@ u8 state_switch_sent = 0;
 #define RETRO_SPELLBOOK	3
 #define RETRO_STATS		4
 
+lstr_t interaction_str = NLSTR();
+char interaction_str_buf[64];
+
 u8 retro_state;
 
 void switch_char(u8 charid) {
@@ -627,7 +649,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		if (ltime) {
 			delta_total += (double)delta_usec;
 			++delta_count;
-			lt_printf("Delta %uqms, avg. %uqms\n", delta_msec, delta_avg_msec);
+// 			lt_printf("Delta %uqms, avg. %uqms\n", delta_msec, delta_avg_msec);
 		}
 		ltime = time;
 
@@ -685,6 +707,14 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		}
 		else
 			LT_ASSERT_NOT_REACHED();
+
+		interaction_str = LSTR(interaction_str_buf, 0);
+		lt_json_t* interaction_js = lt_json_find_child(pieces, CLSTR("Label|button/world/interact"));
+		if (interaction_js) {
+			lstr_t text = lt_json_find_child(interaction_js, CLSTR("text"))->str_val;
+			interaction_str.len = text.len;
+			memcpy(interaction_str_buf, text.str, text.len);
+		}
 
 // 		if (lstate != retro_state) {
 // 			if (retro_state == RETRO_WORLD || retro_state == RETRO_STATS)
@@ -1049,6 +1079,29 @@ void draw_tile(tilemap_t* tilemap, float scr_x, float scr_y, float scr_tilew, u1
 	float ts_tileh = 1.0f / tileset->height;
 	float ts_x = (tile % tileset->width) * ts_tilew;
 	float ts_y = (tile / tileset->width) * ts_tileh;
+
+	usz tile_count = tileset->frame_counts[tile];
+	if (tile_count) {
+		usz duration_total = 0;
+		for (usz i = 0; i < tile_count; ++i)
+			duration_total += tileset->frames[tile][i * 2];
+
+		u64 time = lt_hfreq_time_msec() % duration_total;
+
+		duration_total = 0;
+		for (usz i = 0; i < tile_count; ++i) {
+			u16 frame_tile = tileset->frames[tile][i * 2 + 1];
+			u16 duration = tileset->frames[tile][i * 2];
+
+			if (time < duration_total + duration) {
+				ts_x = (frame_tile % tileset->width) * ts_tilew;
+				ts_y = (frame_tile / tileset->width) * ts_tileh;
+				break;
+			}
+
+			duration_total += duration;
+		}
+	}
 
 	glBegin(GL_QUADS);
 	glTexCoord2f(ts_x, ts_y); glVertex2f(scr_x, scr_y);
