@@ -596,12 +596,15 @@ b8 cmd_pages_wrapped = 0;
 
 u8 state_switch_sent = 0;
 
-#define RETRO_CHARSEL	0
-#define RETRO_WORLD		1
-#define RETRO_INVENTORY	2
-#define RETRO_SPELLBOOK	3
-#define RETRO_STATS		4
-#define RETRO_DIALOGUE	5
+#define RETRO_CHARSEL		0
+#define RETRO_WORLD			1
+#define RETRO_INVENTORY		2
+#define RETRO_SPELLBOOK		3
+#define RETRO_STATS			4
+#define RETRO_DIALOGUE		5
+#define RETRO_CHEST_REWARD	6
+#define RETRO_BANK			7
+#define RETRO_NPC_TRADE		8
 
 lstr_t interaction_str = NLSTR();
 char interaction_str_buf[64];
@@ -724,9 +727,22 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		if (talked_npc_name && talked_npc_dialogue) {
 			lstr_t name = lt_json_find_child(talked_npc_name, CLSTR("text"))->str_val;
 			lstr_t text = lt_json_find_child(talked_npc_dialogue, CLSTR("text"))->str_val;
-			if (lstate != RETRO_DIALOGUE)
+			if (lstate != RETRO_DIALOGUE) {
 				add_chat_msg(asprintf(arena, "[%S] %S", name, text), CHAT_NPC_CLR);
+				send_key(" ");
+			}
 			retro_state = RETRO_DIALOGUE;
+			can_move = 0;
+		}
+
+		lt_json_t* opened_chest_reward = lt_json_find_child(pieces, CLSTR("Label|world/opened-chest/reward"));
+		if (opened_chest_reward) {
+			lstr_t text = lt_json_find_child(opened_chest_reward, CLSTR("text"))->str_val;
+			if (lstate != RETRO_CHEST_REWARD) {
+				add_chat_msg(asprintf(arena, "Found %S", text), CHAT_NPC_CLR);
+				send_key(" ");
+			}
+			retro_state = RETRO_CHEST_REWARD;
 			can_move = 0;
 		}
 
@@ -740,11 +756,11 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 // 		if (lstate != retro_state) {
 // 			if (retro_state == RETRO_WORLD || retro_state == RETRO_STATS)
-// 				send_key(arena, 'c');
+// 				send_key("c");
 // 			else if (retro_state == RETRO_INVENTORY)
-// 				send_key(arena, 'x');
+// 				send_key("x");
 // 			else if (retro_state == RETRO_SPELLBOOK)
-// 				send_key(arena, 'z');
+// 				send_key("z");
 // 		}
 
 // 		lt_json_print(lt_stdout, it->next);
@@ -1432,8 +1448,6 @@ int main(int argc, char** argv) {
 				}
 				break;
 			press_common:
-				if (retro_state == RETRO_DIALOGUE)
-					send_key(" ");
 				break;
 
 			case LT_WIN_EVENT_KEY_RELEASE:
