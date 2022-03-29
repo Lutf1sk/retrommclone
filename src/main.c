@@ -746,6 +746,20 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 			can_move = 0;
 		}
 
+		lt_json_t* bank_section = lt_json_find_child(pieces, CLSTR("Label|world/bank/section-toggle"));
+		if (bank_section) {
+			lstr_t switch_section_text = lt_json_find_child(bank_section, CLSTR("text"))->str_val;
+			lt_printf("%S\n", switch_section_text);
+			retro_state = RETRO_BANK;
+			can_move = 0;
+		}
+
+		lt_json_t* npc_shop_close = lt_json_find_child(pieces, CLSTR("Switch|picture/world/talked-npc-shop/close"));
+		if  (npc_shop_close) {
+			retro_state = RETRO_NPC_TRADE;
+			can_move = 0;
+		}
+
 		interaction_str = LSTR(interaction_str_buf, 0);
 		lt_json_t* interaction_js = lt_json_find_child(pieces, CLSTR("Label|button/world/interact"));
 		if (interaction_js) {
@@ -1448,6 +1462,8 @@ int main(int argc, char** argv) {
 				}
 				break;
 			press_common:
+				if (retro_state == RETRO_BANK || retro_state == RETRO_NPC_TRADE)
+					send_key(" ");
 				break;
 
 			case LT_WIN_EVENT_KEY_RELEASE:
