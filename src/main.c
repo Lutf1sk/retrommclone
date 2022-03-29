@@ -36,6 +36,9 @@ int glyph_bm;
 
 player_t* local_player = NULL;
 
+lstr_t dialogue_name = NLSTR();
+lstr_t dialogue_text = NLSTR();
+
 #define DIR_DOWN	0
 #define DIR_LEFT	1
 #define DIR_RIGHT	2
@@ -47,6 +50,8 @@ struct mask {
 	int texture_m;
 	int texture_f;
 } mask_t;
+
+b8 can_move = 0;
 
 #define MAX_MASKS 256
 
@@ -156,8 +161,17 @@ int inv_item_count = 0;
 lstr_t gold;
 char gold_buf[32];
 
-#define MAX_MSGS 256
-lstr_t chat_msgs[MAX_MSGS];
+typedef
+struct chatmsg {
+	u32 clr;
+	lstr_t text;
+} chatmsg_t;
+
+#define CHAT_NPC_CLR 0xFFFFAA44
+#define CHAT_PLAYER_CLR 0xFF44AAFF
+#define CHAT_SERVER_CLR 0xFFAAAAAA
+
+chatmsg_t* chat_msgs;
 int chat_msg_count = 0;
 
 
@@ -302,6 +316,19 @@ lstr_t asprintf(lt_arena_t* arena, char* fmt, ...) {
 	lt_arena_reserve(arena, len);
 	va_end(list);
 	return LSTR(str, len);
+}
+
+void add_chat_msg(lstr_t msg_str, u32 clr) {
+	// TODO: Fix this garbage :P
+	chat_msgs = realloc(chat_msgs, (chat_msg_count + 1) * sizeof(chatmsg_t));
+
+	chat_msgs[chat_msg_count].text.str = malloc(msg_str.len);
+	chat_msgs[chat_msg_count].text.len = msg_str.len;
+	memcpy(chat_msgs[chat_msg_count].text.str, msg_str.str, msg_str.len);
+
+	chat_msgs[chat_msg_count].clr = clr;
+
+	chat_msg_count++;
 }
 
 chest_t* chest_add(lt_arena_t* arena, lt_json_t* json) {
@@ -574,6 +601,7 @@ u8 state_switch_sent = 0;
 #define RETRO_INVENTORY	2
 #define RETRO_SPELLBOOK	3
 #define RETRO_STATS		4
+#define RETRO_DIALOGUE	5
 
 lstr_t interaction_str = NLSTR();
 char interaction_str_buf[64];
@@ -656,25 +684,6 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		lt_mutex_lock(state_lock);
 		send_begin();
 
-		lt_json_t* chats = lt_json_find_child(it->next, CLSTR("chats"));
-		lt_json_t* chat_it = chats->child;
-		while (chat_it) {
-			lstr_t type = lt_json_find_child(chat_it, CLSTR("type"))->str_val;
-			lstr_t player_slug = lt_json_find_child(chat_it, CLSTR("playerSlug"))->str_val;
-
-			if (lt_lstr_eq(type, CLSTR("logout"))) {
-				lstr_t username = find_player_from_slug(player_slug)->username;
-				lstr_t msg_str = asprintf(arena, "%S has logged out", username);
-
-				chat_msgs[chat_msg_count].str = malloc(msg_str.len);
-				chat_msgs[chat_msg_count].len = msg_str.len;
-				memcpy(chat_msgs[chat_msg_count].str, msg_str.str, msg_str.len);
-				chat_msg_count++;
-			}
-
-			chat_it = chat_it->next;
-		}
-
 		lstr_t local_player_slug = lt_json_find_child(it->next, CLSTR("playerSlug"))->str_val;
 
 		lt_json_t* pieces = lt_json_find_child(it->next, CLSTR("pieces"));
@@ -692,6 +701,8 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		if (lt_json_find_child(pieces, CLSTR("Label|character-select/title")))
 			retro_state = RETRO_CHARSEL;
 		else if (logout) {
+			can_move = 1;
+
 			lstr_t inv_img_slug = lt_json_find_child(botbar_inv, CLSTR("imageSourceSlug"))->str_val;
 			lstr_t spellb_img_slug = lt_json_find_child(botbar_spellb, CLSTR("imageSourceSlug"))->str_val;
 			lstr_t stats_img_slug = lt_json_find_child(botbar_stats, CLSTR("imageSourceSlug"))->str_val;
@@ -707,6 +718,17 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		}
 		else
 			LT_ASSERT_NOT_REACHED();
+
+		lt_json_t* talked_npc_name = lt_json_find_child(pieces, CLSTR("Label|world/talked-npc-dialogue/name"));
+		lt_json_t* talked_npc_dialogue = lt_json_find_child(pieces, CLSTR("Label|world/talked-npc-dialogue/contents"));
+		if (talked_npc_name && talked_npc_dialogue) {
+			lstr_t name = lt_json_find_child(talked_npc_name, CLSTR("text"))->str_val;
+			lstr_t text = lt_json_find_child(talked_npc_dialogue, CLSTR("text"))->str_val;
+			if (lstate != RETRO_DIALOGUE)
+				add_chat_msg(asprintf(arena, "[%S] %S", name, text), CHAT_NPC_CLR);
+			retro_state = RETRO_DIALOGUE;
+			can_move = 0;
+		}
 
 		interaction_str = LSTR(interaction_str_buf, 0);
 		lt_json_t* interaction_js = lt_json_find_child(pieces, CLSTR("Label|button/world/interact"));
@@ -901,39 +923,35 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 			piece_it = piece_it->next;
 		}
 
-		chat_it = chats->child;
-		while (chat_it) {
-			lstr_t type = lt_json_find_child(chat_it, CLSTR("type"))->str_val;
-			lstr_t player_slug = lt_json_find_child(chat_it, CLSTR("playerSlug"))->str_val;
-
-			lstr_t msg_str = NLSTR();
-			if (lt_lstr_eq(type, CLSTR("message"))) {
-				lstr_t username = find_player_from_slug(player_slug)->username;
-				lstr_t msg = lt_json_find_child(chat_it, CLSTR("contents"))->str_val;
-// 				lstr_t channel = lt_json_find_child(chat_it, CLSTR("channel"))->str_val;
-				msg_str = asprintf(arena, "[%S] %S", username, msg);
-			}
-			else if (lt_lstr_eq(type, CLSTR("login"))) {
-				lstr_t username = find_player_from_slug(player_slug)->username;
-				msg_str = asprintf(arena, "%S has logged in", username);
-			}
-
-			if (msg_str.len) {
-				chat_msgs[chat_msg_count].str = malloc(msg_str.len);
-				chat_msgs[chat_msg_count].len = msg_str.len;
-				memcpy(chat_msgs[chat_msg_count].str, msg_str.str, msg_str.len);
-				chat_msg_count++;
-			}
-
-			chat_it = chat_it->next;
-		}
-
 		if (retro_state == RETRO_INVENTORY) {
 			lt_json_t* gold_json = lt_json_find_child(pieces, CLSTR("Label|world/inventory/gold"));
 			lstr_t gold_str = lt_json_find_child(gold_json, CLSTR("text"))->str_val;
 			gold.str = gold_buf;
 			gold.len = gold_str.len;
 			memcpy(gold_buf, gold_str.str, gold_str.len);
+		}
+
+		lt_json_t* chats = lt_json_find_child(it->next, CLSTR("chats"));
+		lt_json_t* chat_it = chats->child;
+		while (chat_it) {
+			lstr_t type = lt_json_find_child(chat_it, CLSTR("type"))->str_val;
+			lstr_t player_slug = lt_json_find_child(chat_it, CLSTR("playerSlug"))->str_val;
+
+			if (lt_lstr_eq(type, CLSTR("logout"))) {
+				lstr_t username = find_player_from_slug(player_slug)->username;
+				add_chat_msg(asprintf(arena, "%S has logged out", username), CHAT_SERVER_CLR);
+			}
+			else if (lt_lstr_eq(type, CLSTR("message"))) {
+				lstr_t username = find_player_from_slug(player_slug)->username;
+				lstr_t msg = lt_json_find_child(chat_it, CLSTR("contents"))->str_val;
+// 				lstr_t channel = lt_json_find_child(chat_it, CLSTR("channel"))->str_val;
+				add_chat_msg(asprintf(arena, "[%S] %S", username, msg), CHAT_PLAYER_CLR);
+			}
+			else if (lt_lstr_eq(type, CLSTR("login"))) {
+				lstr_t username = find_player_from_slug(player_slug)->username;
+				add_chat_msg(asprintf(arena, "%S has logged in", username), CHAT_SERVER_CLR);
+			}
+			chat_it = chat_it->next;
 		}
 
 		last_pageid = charsel_pageid;
@@ -1336,8 +1354,11 @@ int main(int argc, char** argv) {
 	load_texture("collapsed.tga", &icons[LT_GUI_ICON_COLLAPSED]);
 	load_texture("check.tga", &icons[LT_GUI_ICON_CHECK]);
 
+	lt_gui_style_t style = lt_gui_default_style;
+
 	lt_gui_ctx_t gcx, *cx = &gcx;
 	gcx.cont_max = 128;
+	gcx.style = &style;
 	gcx.draw_rect = render_draw_rect;
 	gcx.draw_text = render_draw_text;
 	gcx.draw_icon = render_draw_icon;
@@ -1383,42 +1404,55 @@ int main(int argc, char** argv) {
 		static i8 predict_move_dir = -1;
 		float predict_step_len = 0.0f;
 
-		if (tilemap && local_player) {
-			static i64 w_pressed_msec = -1;
-			static i64 a_pressed_msec = -1;
-			static i64 s_pressed_msec = -1;
-			static i64 d_pressed_msec = -1;
+		static i64 w_pressed_msec = -1;
+		static i64 a_pressed_msec = -1;
+		static i64 s_pressed_msec = -1;
+		static i64 d_pressed_msec = -1;
 
-			for (usz i = 0; i < ev_count; ++i) {
-				lt_window_event_t ev = evs[i];
+		for (usz i = 0; i < ev_count; ++i) {
+			lt_window_event_t ev = evs[i];
 
-				switch (ev.type) {
-				case LT_WIN_EVENT_KEY_PRESS:
-					if (ev.key == LT_KEY_W)
-						w_pressed_msec = time_msec;
-					else if (ev.key == LT_KEY_A)
-						a_pressed_msec = time_msec;
-					else if (ev.key == LT_KEY_S)
-						s_pressed_msec = time_msec;
-					else if (ev.key == LT_KEY_D)
-						d_pressed_msec = time_msec;
-					break;
-
-				case LT_WIN_EVENT_KEY_RELEASE:
-					if (ev.key == LT_KEY_W)
-						w_pressed_msec = -1;
-					else if (ev.key == LT_KEY_A)
-						a_pressed_msec = -1;
-					else if (ev.key == LT_KEY_S)
-						s_pressed_msec = -1;
-					else if (ev.key == LT_KEY_D)
-						d_pressed_msec = -1;
-					break;
-
-				default:
-					break;
+			switch (ev.type) {
+			case LT_WIN_EVENT_KEY_PRESS:
+				if (ev.key == LT_KEY_W) {
+					w_pressed_msec = time_msec;
+					goto press_common;
 				}
+				else if (ev.key == LT_KEY_A) {
+					a_pressed_msec = time_msec;
+					goto press_common;
+				}
+				else if (ev.key == LT_KEY_S) {
+					s_pressed_msec = time_msec;
+					goto press_common;
+				}
+				else if (ev.key == LT_KEY_D) {
+					d_pressed_msec = time_msec;
+					goto press_common;
+				}
+				break;
+			press_common:
+				if (retro_state == RETRO_DIALOGUE)
+					send_key(" ");
+				break;
+
+			case LT_WIN_EVENT_KEY_RELEASE:
+				if (ev.key == LT_KEY_W)
+					w_pressed_msec = -1;
+				else if (ev.key == LT_KEY_A)
+					a_pressed_msec = -1;
+				else if (ev.key == LT_KEY_S)
+					s_pressed_msec = -1;
+				else if (ev.key == LT_KEY_D)
+					d_pressed_msec = -1;
+				break;
+
+			default:
+				break;
 			}
+		}
+
+		if (tilemap && local_player && can_move) {
 
 			static u64 walk_start_msec = 0;
 
@@ -1559,8 +1593,12 @@ int main(int argc, char** argv) {
 		}
 
 		lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_OUTSET);
-		for (usz i = 0; i < chat_msg_count; ++i)
-			lt_gui_label(cx, chat_msgs[i], 0);
+		u32 text_clr = cx->style->text_clr;
+		for (usz i = 0; i < chat_msg_count; ++i) {
+			cx->style->text_clr = chat_msgs[i].clr;
+			lt_gui_text(cx, chat_msgs[i].text, 0);
+		}
+		cx->style->text_clr = text_clr;
 		lt_gui_panel_end(cx);
 
 		lt_gui_panel_end(cx);
@@ -1568,6 +1606,7 @@ int main(int argc, char** argv) {
 		lt_gui_panel_end(cx);
 
 		lt_gui_end(cx);
+		glColor3f(1.0f, 1.0f, 1.0f);
 
 		render_scissor(NULL, &game_area);
 
@@ -1664,7 +1703,10 @@ int main(int argc, char** argv) {
 				isz x = players[i].x;
 				isz y = players[i].y;
 				u8 dir = players[i].direction;
-				if (&players[i] == local_player) {
+
+				b8 is_local = &players[i] == local_player;
+
+				if (is_local) {
 					dir = predict_move_dir;
 					x = predict_x;
 					y = predict_y;
@@ -1694,19 +1736,28 @@ int main(int argc, char** argv) {
 				if (mask)
 					draw_cosmetic(scr_x, scr_y, scr_tilew, mask->texture_m, dir, animation_frame);
 
-				float name_w = font->width * players[i].username.len;
+				lstr_t text = players[i].username;
+
+				if (is_local && interaction_str.len) {
+					text = asprintf(arena, "(E) %S", interaction_str);
+					if (lt_window_key_pressed(win, LT_KEY_E))
+						send_key(" ");
+				}
+
+				float name_w = font->width * text.len;
 				float name_h = font->height;
 
 				float name_x = scr_x + scr_tilew/2 - name_w/2;
 				float name_y = scr_y - name_h;
 
 				pname_pts[pname_count] = LT_GUI_POINT(round(name_x), round(name_y));
-				pname_strs[pname_count] = players[i].username;
+				pname_strs[pname_count] = text;
 				pname_clrs[pname_count] = 0xFFFFFFFF;
 
 				pname_bg_rects[pname_count] = LT_GUI_RECT(round(name_x - 2.0f), round(name_y - 1.0f), round(name_w + 4.0f), round(name_h + 2.0f));
 				pname_bg_clrs[pname_count] = 0xFF000000;
-				++pname_count;
+				if (!is_local || interaction_str.len)
+					++pname_count;
 			}
 
 			for (usz y = 0; y < tilemap->h; ++y) {
