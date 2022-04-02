@@ -589,6 +589,9 @@ tilemap_t* tilemap_add(lt_arena_t* arena, lt_json_t* json) {
 
 #define CMD_SWITCH_CHAR 1
 #define CMD_GET_CHARS	2
+#define CMD_INN_ACCEPT	3
+#define CMD_INN_REJECT	4
+
 u8 cmd = CMD_GET_CHARS;
 u8 cmd_charid = 0;
 int cmd_start_page = -1;
@@ -605,11 +608,17 @@ u8 state_switch_sent = 0;
 #define RETRO_CHEST_REWARD	6
 #define RETRO_BANK			7
 #define RETRO_NPC_TRADE		8
+#define RETRO_INN			9
 
 lstr_t interaction_str = NLSTR();
 char interaction_str_buf[64];
 
 u8 retro_state;
+
+b8 rest_available = 0;
+
+lstr_t inn_text = NLSTR();
+char inn_text_buf[256];
 
 void switch_char(u8 charid) {
 	cmd = CMD_SWITCH_CHAR;
@@ -722,8 +731,8 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		else
 			LT_ASSERT_NOT_REACHED();
 
-		lt_json_t* talked_npc_name = lt_json_find_child(pieces, CLSTR("Label|world/talked-npc-dialogue/name"));
-		lt_json_t* talked_npc_dialogue = lt_json_find_child(pieces, CLSTR("Label|world/talked-npc-dialogue/contents"));
+		lt_json_t* talked_npc_name = lt_json_find_child(pieces, CLSTR("Label|world/talked-npc/dialogue/name"));
+		lt_json_t* talked_npc_dialogue = lt_json_find_child(pieces, CLSTR("Label|world/talked-npc/dialogue/contents"));
 		if (talked_npc_name && talked_npc_dialogue) {
 			lstr_t name = lt_json_find_child(talked_npc_name, CLSTR("text"))->str_val;
 			lstr_t text = lt_json_find_child(talked_npc_dialogue, CLSTR("text"))->str_val;
@@ -754,9 +763,41 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 			can_move = 0;
 		}
 
-		lt_json_t* npc_shop_close = lt_json_find_child(pieces, CLSTR("Switch|picture/world/talked-npc-shop/close"));
+		lt_json_t* npc_shop_close = lt_json_find_child(pieces, CLSTR("Switch|picture/world/talked-npc/shop/close"));
 		if  (npc_shop_close) {
 			retro_state = RETRO_NPC_TRADE;
+			can_move = 0;
+		}
+
+		lt_json_t* inn_text_js = lt_json_find_child(pieces, CLSTR("Label|world/talked-npc/inn"));
+		if (inn_text_js) {
+			lt_json_t* inn_yes = lt_json_find_child(pieces, CLSTR("Switch|button/world/talked-npc/inn/yes"));
+			lt_json_t* inn_no = lt_json_find_child(pieces, CLSTR("Switch|button/world/talked-npc/inn/no"));
+
+			rest_available = 0;
+			if (inn_yes && inn_no) {
+				rest_available = 1;
+
+				if (cmd == CMD_INN_ACCEPT) {
+					isz x = lt_json_int_val(lt_json_find_child(inn_yes, CLSTR("x")));
+					isz y = lt_json_int_val(lt_json_find_child(inn_yes, CLSTR("y")));
+					send_click(x + 1, y + 1);
+					cmd = 0;
+				}
+				else if (cmd == CMD_INN_REJECT) {
+					isz x = lt_json_int_val(lt_json_find_child(inn_no, CLSTR("x")));
+					isz y = lt_json_int_val(lt_json_find_child(inn_no, CLSTR("y")));
+					send_click(x + 1, y + 1);
+					cmd = 0;
+				}
+
+			}
+
+			lstr_t text = lt_json_find_child(inn_text_js, CLSTR("text"))->str_val;
+			memcpy(inn_text_buf, text.str, text.len);
+			inn_text = LSTR(inn_text_buf, text.len);
+
+			retro_state = RETRO_INN;
 			can_move = 0;
 		}
 
@@ -916,7 +957,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				characters[char_id].page = charsel_pageid;
 				characters[char_id].present = 1;
 			}
-			else if (retro_state == RETRO_INVENTORY && lt_lstr_startswith(piece_it->key, CLSTR("Label|world/inventory/bag/"))) {
+			else if (lt_lstr_startswith(piece_it->key, CLSTR("Label|world/inventory/bag/"))) {
 				usz pfx_len = CLSTR("Label|world/inventory/bag/").len;
 				usz slot_id = lt_lstr_uint(LSTR(piece_it->key.str + pfx_len, piece_it->key.len - pfx_len));
 
@@ -937,7 +978,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 				lt_json_t* opened_at = lt_json_find_child(piece_it, CLSTR("openedAt"));
 				if (opened_at->stype != LT_JSON_NULL)
-					chests[chest_index].opened_at = lt_json_int_val(opened_at);;
+					chests[chest_index].opened_at = lt_json_int_val(opened_at);
 			}
 			else if (lt_lstr_startswith(piece_it->key, CLSTR("NPC|"))) {
 				usz pfx_len = CLSTR("NPC|").len;
@@ -1396,6 +1437,10 @@ int main(int argc, char** argv) {
 	gcx.glyph_height = font->height;
 	gcx.glyph_width = font->width;
 
+	lt_gui_ctx_t gcx2 = gcx;
+
+	lt_gui_ctx_init(arena, &gcx2);
+
 	lt_gui_ctx_init(arena, cx);
 
 	lt_thread_t* recv_thread = lt_thread_create(arena, recv_thread_proc, NULL);
@@ -1462,7 +1507,7 @@ int main(int argc, char** argv) {
 				}
 				break;
 			press_common:
-				if (retro_state == RETRO_BANK || retro_state == RETRO_NPC_TRADE)
+				if (retro_state == RETRO_BANK || retro_state == RETRO_NPC_TRADE || retro_state == RETRO_INN)
 					send_key(" ");
 				break;
 
@@ -1580,7 +1625,7 @@ int main(int argc, char** argv) {
 			predict_step_len = 1.0f - ((float)(time_msec - walk_anim_start_msec) / MOVESPEED);
 		}
 
-		lt_gui_begin(cx, width, height);
+		lt_gui_begin(cx, 0, 0, width, height);
 
 		lt_gui_panel_begin(cx, 0, 0, 0);
 
@@ -1640,9 +1685,9 @@ int main(int argc, char** argv) {
 
 		render_scissor(NULL, &game_area);
 
-		if (tilemap && cmd != CMD_GET_CHARS && cmd != CMD_SWITCH_CHAR) {
-			float scr_tilew = 32.0f;
+#define scr_tilew 32.0f
 
+		if (tilemap && cmd != CMD_GET_CHARS && cmd != CMD_SWITCH_CHAR) {
 			float scr_tileoffs_x = game_area.x - (predict_x * scr_tilew) + game_area.w/2 - scr_tilew/2;
 			float scr_tileoffs_y = game_area.y - (predict_y * scr_tilew) + game_area.h/2 - scr_tilew/2;
 
@@ -1812,6 +1857,44 @@ int main(int argc, char** argv) {
 				render_draw_text(NULL, 1, &pname_pts[i], &pname_strs[i], &pname_clrs[i]);
 			}
 		}
+
+		render_scissor(NULL, NULL);
+
+		cx = &gcx2;
+
+		lt_window_mouse_pos(win, &cx->mouse_x, &cx->mouse_y);
+		cx->mouse_state = lt_window_key_pressed(win, LT_KEY_MB1);
+
+#define POPUP_W 400
+#define POPUP_H 105
+
+		usz center_x = game_area.x + game_area.w/2 - POPUP_W/2;
+		usz center_y = game_area.y + game_area.h/2 - POPUP_H - scr_tilew;
+
+		lt_gui_begin(cx, center_x, center_y, 400, 105);
+
+		if (retro_state == RETRO_INN) {
+			lt_gui_panel_begin(cx, 0, 0, 0);
+
+			lt_gui_panel_begin(cx, 0, 20, 0);
+			lt_gui_label(cx, CLSTR("Inn"), 0);
+			lt_gui_panel_end(cx);
+
+			lt_gui_panel_begin(cx, 0, 0, 0);
+			lt_gui_text(cx, inn_text, 0);
+			lt_gui_row(cx, 2);
+			if (lt_gui_button(cx, CLSTR("Yes"), 0))
+				cmd = CMD_INN_ACCEPT;
+
+			if (lt_gui_button(cx, CLSTR("No"), 0))
+				cmd = CMD_INN_REJECT;
+			lt_gui_panel_end(cx);
+
+			lt_gui_panel_end(cx);
+		}
+		lt_gui_end(cx);
+
+		cx = &gcx;
 
 		send_end();
 		lt_mutex_release(state_lock);

@@ -140,6 +140,9 @@ void render_draw_icon(void* usr, usz icon, lt_gui_rect_t* r, u32 clr) {
 void render_scissor(void* usr, lt_gui_rect_t* r) {
 	int width, height;
 	lt_window_get_size(win, &width, &height);
-	glScissor(r->x, height - (r->y + r->h), r->w, r->h);
+	if (!r)
+		glScissor(0, 0, width, height);
+	else
+		glScissor(r->x, height - (r->y + r->h), r->w, r->h);
 }
 
