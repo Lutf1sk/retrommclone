@@ -26,6 +26,9 @@
 typedef struct tilemap tilemap_t;
 typedef struct player player_t;
 
+typedef struct clothes_dye clothes_dye_t;
+typedef struct hair_dye hair_dye_t;
+
 lt_arena_t* arena = NULL;
 lt_socket_t* sock = NULL;
 lt_window_t* win = NULL;
@@ -84,6 +87,8 @@ struct player {
 	u8 figure;
 	mask_t* mask;
 	outfit_t* outfit;
+	clothes_dye_t* clothes_dye;
+	hair_dye_t* hair_dye;
 
 	u64 walk_start;
 } player_t;
@@ -147,6 +152,61 @@ struct character {
 } character_t;
 
 #define MAX_CHARACTERS 21
+
+typedef
+struct clothes_color {
+	lstr_t slug;
+	u32 clr1;
+	u32 clr2;
+} clothes_color_t;
+
+clothes_color_t* clothes_colors;
+usz clothes_color_count = 0;
+
+typedef
+struct hair_color {
+	lstr_t slug;
+	u32 clr1;
+	u32 clr2;
+	u32 clr3;
+} hair_color_t;
+
+hair_color_t* hair_colors;
+usz hair_color_count = 0;
+
+typedef
+struct clothes_dye {
+	lstr_t slug;
+	clothes_color_t* primary;
+	clothes_color_t* secondary;
+} clothes_dye_t;
+
+clothes_dye_t* clothes_dyes;
+usz clothes_dye_count = 0;
+
+typedef
+struct hair_dye {
+	lstr_t slug;
+	hair_color_t* color;
+} hair_dye_t;
+
+hair_dye_t* hair_dyes;
+usz hair_dye_count = 0;
+
+typedef
+struct item {
+	lstr_t slug;
+	lstr_t name;
+	lstr_t img_slug;
+	void* dye;
+	u16 sell_value;
+	u8 flags;
+} item_t;
+
+#define ITEM_TRADABLE 1
+
+item_t* items;
+usz item_count = 0;
 
 character_t characters[MAX_CHARACTERS];
 int character_count = 0;
@@ -241,7 +301,6 @@ player_t* new_player(lstr_t slug, lstr_t username) {
 	players[player_count].slug = LSTR(player_slugs[player_count], slug.len);
 
 	memcpy(player_usernames[player_count], username.str, username.len);
-	players[player_count].username = LSTR(player_usernames[player_count], username.len);
 
 	return &players[player_count++];
 }
@@ -275,6 +334,13 @@ outfit_t* find_outfit(lstr_t slug) {
 	return NULL;
 }
 
+item_t* find_item(lstr_t slug) {
+	for (usz i = 0; i < item_count; ++i)
+		if (lt_lstr_eq(slug, items[i].slug))
+			return &items[i];
+	return NULL;
+}
+
 i8 find_chest_index(lstr_t slug) {
 	for (usz i = 0; i < chest_count; ++i)
 		if (lt_lstr_eq(slug, chests[i].slug))
@@ -294,6 +360,34 @@ i8 find_npc_index(lstr_t slug) {
 		if (lt_lstr_eq(slug, npcs[i].slug))
 			return i;
 	return -1;
+}
+
+hair_color_t* find_hair_color(lstr_t slug) {
+	for (usz i = 0; i < hair_color_count; ++i)
+		if (lt_lstr_eq(slug, hair_colors[i].slug))
+			return &hair_colors[i];
+	return NULL;
+}
+
+clothes_color_t* find_clothes_color(lstr_t slug) {
+	for (usz i = 0; i < clothes_color_count; ++i)
+		if (lt_lstr_eq(slug, clothes_colors[i].slug))
+			return &clothes_colors[i];
+	return NULL;
+}
+
+hair_dye_t* find_hair_dye(lstr_t slug) {
+	for (usz i = 0; i < hair_dye_count; ++i)
+		if (lt_lstr_eq(slug, hair_dyes[i].slug))
+			return &hair_dyes[i];
+	return NULL;
+}
+
+clothes_dye_t* find_clothes_dye(lstr_t slug) {
+	for (usz i = 0; i < clothes_dye_count; ++i)
+		if (lt_lstr_eq(slug, clothes_dyes[i].slug))
+			return &clothes_dyes[i];
+	return NULL;
 }
 
 u8 find_direction(lstr_t str) {
@@ -329,6 +423,83 @@ void add_chat_msg(lstr_t msg_str, u32 clr) {
 	chat_msgs[chat_msg_count].clr = clr;
 
 	chat_msg_count++;
+}
+
+void item_add(lt_arena_t* arena, lt_json_t* json) {
+	// TODO: Fix this garbage :P
+	items = realloc(items, (item_count + 1) * sizeof(item_t));
+
+	usz pfx_len = CLSTR("Item|").len;
+	items[item_count].slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+
+	lt_json_t* clothes_dye_js = lt_json_find_child(json, CLSTR("clothesDyeSlug"));
+	if (clothes_dye_js->stype != LT_JSON_NULL)
+		items[item_count].dye = find_clothes_dye(clothes_dye_js->str_val);
+
+	lt_json_t* hair_dye_js = lt_json_find_child(json, CLSTR("hairDyeSlug"));
+	if (hair_dye_js->stype != LT_JSON_NULL)
+		items[item_count].dye = find_hair_dye(hair_dye_js->str_val);
+
+	item_count++;
+}
+
+void clothes_color_add(lt_arena_t* arena, lt_json_t* json) {
+	// TODO: Fix this garbage :P
+	clothes_colors = realloc(clothes_colors, (clothes_color_count + 1) * sizeof(clothes_color_t));
+
+	usz pfx_len = CLSTR("ClothesColor|").len;
+	clothes_colors[clothes_color_count].slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+	lstr_t clr1_str = lt_json_find_child(json, CLSTR("color1"))->str_val;
+	++clr1_str.str, --clr1_str.len;
+	lstr_t clr2_str = lt_json_find_child(json, CLSTR("color2"))->str_val;
+	++clr2_str.str, --clr2_str.len;
+	clothes_colors[clothes_color_count].clr1 = lt_lstr_hex_uint(clr1_str);
+	clothes_colors[clothes_color_count].clr2 = lt_lstr_hex_uint(clr2_str);
+
+	clothes_color_count++;
+}
+
+void hair_color_add(lt_arena_t* arena, lt_json_t* json) {
+	// TODO: Fix this garbage :P
+	hair_colors = realloc(hair_colors, (hair_color_count + 1) * sizeof(hair_color_t));
+
+	usz pfx_len = CLSTR("HairColor|").len;
+	hair_colors[hair_color_count].slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+
+	lstr_t clr1_str = lt_json_find_child(json, CLSTR("color1"))->str_val;
+	++clr1_str.str, --clr1_str.len;
+	lstr_t clr2_str = lt_json_find_child(json, CLSTR("color2"))->str_val;
+	++clr2_str.str, --clr2_str.len;
+	lstr_t clr3_str = lt_json_find_child(json, CLSTR("color3"))->str_val;
+	++clr3_str.str, --clr3_str.len;
+	hair_colors[hair_color_count].clr1 = lt_lstr_hex_uint(clr1_str);
+	hair_colors[hair_color_count].clr2 = lt_lstr_hex_uint(clr2_str);
+	hair_colors[hair_color_count].clr3 = lt_lstr_hex_uint(clr3_str);
+
+	hair_color_count++;
+}
+
+void clothes_dye_add(lt_arena_t* arena, lt_json_t* json) {
+	// TODO: Fix this garbage :P
+	clothes_dyes = realloc(clothes_dyes, (clothes_dye_count + 1) * sizeof(clothes_dye_t));
+
+	usz pfx_len = CLSTR("ClothesDye|").len;
+	clothes_dyes[clothes_dye_count].slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+	clothes_dyes[clothes_dye_count].primary = find_clothes_color(lt_json_find_child(json, CLSTR("primaryClothesColorSlug"))->str_val);
+	clothes_dyes[clothes_dye_count].secondary = find_clothes_color(lt_json_find_child(json, CLSTR("secondaryClothesColorSlug"))->str_val);
+
+	clothes_dye_count++;
+}
+
+void hair_dye_add(lt_arena_t* arena, lt_json_t* json) {
+	// TODO: Fix this garbage :P
+	hair_dyes = realloc(hair_dyes, (hair_dye_count + 1) * sizeof(hair_dye_t));
+
+	usz pfx_len = CLSTR("HairDye|").len;
+	hair_dyes[hair_dye_count].slug = LSTR(json->key.str + pfx_len, json->key.len - pfx_len);
+	hair_dyes[hair_dye_count].color = find_hair_color(lt_json_find_child(json, CLSTR("hairColorSlug"))->str_val);
+
+	hair_dye_count++;
 }
 
 chest_t* chest_add(lt_arena_t* arena, lt_json_t* json) {
@@ -894,6 +1065,18 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				if (lt_lstr_eq(slug, local_player_slug))
 					local_player = player;
 
+				lt_json_t* clothes_dye_item_slug = lt_json_find_child(piece_it, CLSTR("clothesDyeItemSlug"));
+				if (clothes_dye_item_slug->stype != LT_JSON_NULL) {
+					item_t* dye_item = find_item(clothes_dye_item_slug->str_val);
+					player->clothes_dye = dye_item->dye;
+				}
+
+				lt_json_t* hair_dye_item_slug = lt_json_find_child(piece_it, CLSTR("hairDyeItemSlug"));
+				if (hair_dye_item_slug->stype != LT_JSON_NULL) {
+					item_t* dye_item = find_item(clothes_dye_item_slug->str_val);
+					player->hair_dye = dye_item->dye;
+				}
+
 				lt_json_t* tilemap_js = lt_json_find_child(piece_it, CLSTR("tilemapSlug"));
 				if (tilemap_js->stype == LT_JSON_STRING)
 					player->tilemap = find_tilemap(tilemap_js->str_val);
@@ -1366,6 +1549,10 @@ int main(int argc, char** argv) {
 			mask_add(arena, ddef_it);
 		else if (lt_lstr_startswith(ddef_it->key, CLSTR("Outfit|")))
 			outfit_add(arena, ddef_it);
+		else if (lt_lstr_startswith(ddef_it->key, CLSTR("ClothesColor|")))
+			clothes_color_add(arena, ddef_it);
+		else if (lt_lstr_startswith(ddef_it->key, CLSTR("HairColor|")))
+			hair_color_add(arena, ddef_it);
 		ddef_it = ddef_it->next;
 	}
 
@@ -1373,6 +1560,10 @@ int main(int argc, char** argv) {
 	while (ddef_it) {
 		if (lt_lstr_startswith(ddef_it->key, CLSTR("Tileset|")))
 			tileset_add(arena, ddef_it);
+		else if (lt_lstr_startswith(ddef_it->key, CLSTR("ClothesDye|")))
+			clothes_dye_add(arena, ddef_it);
+		else if (lt_lstr_startswith(ddef_it->key, CLSTR("HairDye|")))
+			hair_dye_add(arena, ddef_it);
 		ddef_it = ddef_it->next;
 	}
 
@@ -1380,6 +1571,8 @@ int main(int argc, char** argv) {
 	while (ddef_it) {
 		if (lt_lstr_startswith(ddef_it->key, CLSTR("Tilemap|")))
 			tilemap_add(arena, ddef_it);
+		else if (lt_lstr_startswith(ddef_it->key, CLSTR("Item|")))
+			item_add(arena, ddef_it);
 		ddef_it = ddef_it->next;
 	}
 
@@ -1453,6 +1646,18 @@ int main(int argc, char** argv) {
 	render_init();
 
 	lt_arena_t* arena = lt_arena_alloc(LT_MB(1));
+
+	for (usz i = 0; i < item_count; ++i) {
+		lt_printf("item: %S\n", items[i].slug);
+	}
+
+	for (usz i = 0; i < clothes_dye_count; ++i) {
+		lt_printf("clothes_dye: %S\n", clothes_dyes[i].slug);
+	}
+
+	for (usz i = 0; i < hair_dye_count; ++i) {
+		lt_printf("hair_dye: %S\n", hair_dyes[i].slug);
+	}
 
 	while (!lt_window_closed(win) && !quit) {
 		lt_arestore_t arestore = lt_arena_save(arena);
@@ -1874,19 +2079,19 @@ int main(int argc, char** argv) {
 		lt_gui_begin(cx, center_x, center_y, 400, 105);
 
 		if (retro_state == RETRO_INN) {
-			lt_gui_panel_begin(cx, 0, 0, 0);
+			lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_OUTSET);
 
-			lt_gui_panel_begin(cx, 0, 20, 0);
+			lt_gui_panel_begin(cx, 0, 20, LT_GUI_BORDER_INSET);
 			lt_gui_label(cx, CLSTR("Inn"), 0);
 			lt_gui_panel_end(cx);
 
-			lt_gui_panel_begin(cx, 0, 0, 0);
+			lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_INSET);
 			lt_gui_text(cx, inn_text, 0);
 			lt_gui_row(cx, 2);
-			if (lt_gui_button(cx, CLSTR("Yes"), 0))
+			if (rest_available && (lt_gui_button(cx, CLSTR("(E) Yes"), 0) || lt_window_key_pressed(win, LT_KEY_E)))
 				cmd = CMD_INN_ACCEPT;
 
-			if (lt_gui_button(cx, CLSTR("No"), 0))
+			if (lt_gui_button(cx, CLSTR("(Q) No"), 0) || lt_window_key_pressed(win, LT_KEY_Q))
 				cmd = CMD_INN_REJECT;
 			lt_gui_panel_end(cx);
 
