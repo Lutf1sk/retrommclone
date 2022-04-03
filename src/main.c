@@ -20,6 +20,8 @@
 #include <time.h>
 #include <GL/gl.h>
 
+#define CHATMSG_MAXLEN 254
+
 #define USERNAME_MAXLEN 18
 #define USERSLUG_MAXLEN 21
 
@@ -280,12 +282,6 @@ void send_pong(lt_socket_t* sock) {
 
 lt_mutex_t* state_lock;
 
-// void send_chat(lt_arena_t* arena, lt_socket_t* sock, lstr_t channel, lstr_t msg) {
-// 	char* buf = lt_arena_reserve(arena, 0);
-// 	usz len = lt_str_printf(buf, "42[\"message\",{\"channel\":\"%S\",\"contents\":\"%S\"}]", channel, msg);
-// 	ws_send_text(sock, LSTR(buf, len));
-// }
-
 player_t* find_player_from_slug(lstr_t slug) {
 	for (usz i = 0; i < player_count; ++i)
 		if (lt_lstr_eq(slug, players[i].slug))
@@ -301,6 +297,7 @@ player_t* new_player(lstr_t slug, lstr_t username) {
 	players[player_count].slug = LSTR(player_slugs[player_count], slug.len);
 
 	memcpy(player_usernames[player_count], username.str, username.len);
+	players[player_count].username = LSTR(player_usernames[player_count], username.len);
 
 	return &players[player_count++];
 }
@@ -762,11 +759,14 @@ tilemap_t* tilemap_add(lt_arena_t* arena, lt_json_t* json) {
 #define CMD_GET_CHARS	2
 #define CMD_INN_ACCEPT	3
 #define CMD_INN_REJECT	4
+#define CMD_BANK_CLOSE	5
 
 u8 cmd = CMD_GET_CHARS;
 u8 cmd_charid = 0;
 int cmd_start_page = -1;
 b8 cmd_pages_wrapped = 0;
+
+b8 popup_open = 0;
 
 u8 state_switch_sent = 0;
 
@@ -811,6 +811,12 @@ void send_end(void) {
 	if (send_len)
 		lt_socket_send(sock, send_buf, send_len);
 }
+
+void send_chat(lstr_t channel, lstr_t msg) {
+	send_len += ws_write_frame_start(&send_buf[send_len], WS_FIN | WS_TEXT, CLSTR("42[\"message\",{\"channel\":\"\",\"contents\":\"\"}]").len + channel.len + msg.len);
+	send_len += lt_str_printf(&send_buf[send_len], "42[\"message\",{\"channel\":\"%S\",\"contents\":\"%S\"}]", channel, msg);
+}
+
 
 void send_click(int x, int y) {
 	char tmp[32];
@@ -871,7 +877,6 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 		lt_json_t* pieces = lt_json_find_child(it->next, CLSTR("pieces"));
 		lt_json_t* piece_it = pieces->child;
-		player_count = 0;
 
 		lt_json_t* logout = lt_json_find_child(pieces, CLSTR("Switch|picture/world/logout"));
 
@@ -930,8 +935,15 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 		if (bank_section) {
 			lstr_t switch_section_text = lt_json_find_child(bank_section, CLSTR("text"))->str_val;
 			lt_printf("%S\n", switch_section_text);
+			if (cmd == CMD_BANK_CLOSE) {
+				send_key(" ");
+				cmd = 0;
+			}
 			retro_state = RETRO_BANK;
 			can_move = 0;
+
+			if (retro_state != lstate)
+				popup_open = 1;
 		}
 
 		lt_json_t* npc_shop_close = lt_json_find_child(pieces, CLSTR("Switch|picture/world/talked-npc/shop/close"));
@@ -970,6 +982,9 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 			retro_state = RETRO_INN;
 			can_move = 0;
+
+			if (retro_state != lstate)
+				popup_open = 1;
 		}
 
 		interaction_str = LSTR(interaction_str_buf, 0);
@@ -1070,12 +1085,16 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 					item_t* dye_item = find_item(clothes_dye_item_slug->str_val);
 					player->clothes_dye = dye_item->dye;
 				}
+				else
+					player->clothes_dye = NULL;
 
 				lt_json_t* hair_dye_item_slug = lt_json_find_child(piece_it, CLSTR("hairDyeItemSlug"));
 				if (hair_dye_item_slug->stype != LT_JSON_NULL) {
 					item_t* dye_item = find_item(clothes_dye_item_slug->str_val);
 					player->hair_dye = dye_item->dye;
 				}
+				else
+					player->hair_dye = NULL;
 
 				lt_json_t* tilemap_js = lt_json_find_child(piece_it, CLSTR("tilemapSlug"));
 				if (tilemap_js->stype == LT_JSON_STRING)
@@ -1712,8 +1731,10 @@ int main(int argc, char** argv) {
 				}
 				break;
 			press_common:
-				if (retro_state == RETRO_BANK || retro_state == RETRO_NPC_TRADE || retro_state == RETRO_INN)
+				if (popup_open) {
+					popup_open = 0;
 					send_key(" ");
+				}
 				break;
 
 			case LT_WIN_EVENT_KEY_RELEASE:
@@ -1872,7 +1893,7 @@ int main(int argc, char** argv) {
 			lt_gui_panel_end(cx);
 		}
 
-		lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_OUTSET);
+		lt_gui_panel_begin(cx, 0, -20, LT_GUI_BORDER_OUTSET);
 		u32 text_clr = cx->style->text_clr;
 		for (usz i = 0; i < chat_msg_count; ++i) {
 			cx->style->text_clr = chat_msgs[i].clr;
@@ -1880,6 +1901,29 @@ int main(int argc, char** argv) {
 		}
 		cx->style->text_clr = text_clr;
 		lt_gui_panel_end(cx);
+
+		static char tb_buf[CHATMSG_MAXLEN] = {""};
+		static lt_gui_textbox_state_t tb_state = { tb_buf, CHATMSG_MAXLEN, 0 };
+
+		if (lt_gui_textbox(cx, 0, 0, &tb_state, LT_GUI_BORDER_INSET)) {
+			for (usz i = 0; i < ev_count; ++i) {
+				lt_window_event_t ev = evs[i];
+				if (ev.type == LT_WIN_EVENT_KEY_PRESS) {
+					usz len = strnlen(tb_buf, CHATMSG_MAXLEN);
+					if (ev.key >= LT_KEY_PRINTABLE_MIN && ev.key <= LT_KEY_PRINTABLE_MAX && len < CHATMSG_MAXLEN) {
+						tb_buf[len] = ev.key;
+						if (len < (CHATMSG_MAXLEN - 1))
+							tb_buf[len + 1] = 0;
+					}
+					else if (ev.key == LT_KEY_BACKSPACE && len)
+						tb_buf[len - 1] = 0;
+					else if (ev.key == LT_KEY_ENTER && len) {
+						send_chat(CLSTR("global"), LSTR(tb_buf, len));
+						tb_buf[0] = 0;
+					}
+				}
+			}
+		}
 
 		lt_gui_panel_end(cx);
 
@@ -2076,23 +2120,47 @@ int main(int argc, char** argv) {
 		usz center_x = game_area.x + game_area.w/2 - POPUP_W/2;
 		usz center_y = game_area.y + game_area.h/2 - POPUP_H - scr_tilew;
 
-		lt_gui_begin(cx, center_x, center_y, 400, 105);
-
-		if (retro_state == RETRO_INN) {
+		lt_gui_begin(cx, center_x, center_y, 400, 106);
+		if (retro_state == RETRO_INN && popup_open) {
 			lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_OUTSET);
 
-			lt_gui_panel_begin(cx, 0, 20, LT_GUI_BORDER_INSET);
+			lt_gui_panel_begin(cx, 0, 24, LT_GUI_BORDER_INSET);
+			lt_gui_row(cx, 2);
 			lt_gui_label(cx, CLSTR("Inn"), 0);
+			if (lt_gui_button(cx, CLSTR("(Q) Close"), LT_GUI_ALIGN_RIGHT) || lt_window_key_pressed(win, LT_KEY_Q)) {
+				cmd = CMD_INN_REJECT;
+				popup_open = 0;
+			}
 			lt_gui_panel_end(cx);
 
 			lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_INSET);
 			lt_gui_text(cx, inn_text, 0);
-			lt_gui_row(cx, 2);
-			if (rest_available && (lt_gui_button(cx, CLSTR("(E) Yes"), 0) || lt_window_key_pressed(win, LT_KEY_E)))
+			if (rest_available && (lt_gui_button(cx, CLSTR("(E) Rest"), 0) || lt_window_key_pressed(win, LT_KEY_E))) {
 				cmd = CMD_INN_ACCEPT;
+				popup_open = 0;
+			}
+			lt_gui_panel_end(cx);
 
-			if (lt_gui_button(cx, CLSTR("(Q) No"), 0) || lt_window_key_pressed(win, LT_KEY_Q))
-				cmd = CMD_INN_REJECT;
+			lt_gui_panel_end(cx);
+		}
+		if (retro_state == RETRO_BANK && popup_open) {
+			lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_OUTSET);
+
+			lt_gui_panel_begin(cx, 0, 24, LT_GUI_BORDER_INSET);
+			lt_gui_row(cx, 2);
+			lt_gui_label(cx, CLSTR("Bank"), 0);
+			if (lt_gui_button(cx, CLSTR("(Q) Close"), LT_GUI_ALIGN_RIGHT) || lt_window_key_pressed(win, LT_KEY_Q)) {
+				cmd = CMD_BANK_CLOSE;
+				popup_open = 0;
+			}
+			lt_gui_panel_end(cx);
+
+			usz w = POPUP_W/2 - cx->style->spacing;
+
+			lt_gui_row(cx, 2);
+			lt_gui_panel_begin(cx, w, 0, LT_GUI_BORDER_INSET);
+			lt_gui_panel_end(cx);
+			lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_INSET);
 			lt_gui_panel_end(cx);
 
 			lt_gui_panel_end(cx);
