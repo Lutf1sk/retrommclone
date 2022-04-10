@@ -760,6 +760,7 @@ tilemap_t* tilemap_add(lt_arena_t* arena, lt_json_t* json) {
 #define CMD_INN_ACCEPT	3
 #define CMD_INN_REJECT	4
 #define CMD_BANK_CLOSE	5
+#define CMD_CREATE_CHAR 6
 
 u8 cmd = CMD_GET_CHARS;
 u8 cmd_charid = 0;
@@ -787,6 +788,10 @@ char interaction_str_buf[64];
 u8 retro_state;
 
 b8 rest_available = 0;
+
+char tb_buf[CHATMSG_MAXLEN] = {""};
+lt_gui_textbox_state_t tb_state = { tb_buf, CHATMSG_MAXLEN, 0 };
+b8 textbox_selected = 0;
 
 lstr_t inn_text = NLSTR();
 char inn_text_buf[256];
@@ -914,7 +919,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 			lstr_t text = lt_json_find_child(talked_npc_dialogue, CLSTR("text"))->str_val;
 			if (lstate != RETRO_DIALOGUE) {
 				add_chat_msg(asprintf(arena, "[%S] %S", name, text), CHAT_NPC_CLR);
-				send_key(" ");
+				send_key("Space");
 			}
 			retro_state = RETRO_DIALOGUE;
 			can_move = 0;
@@ -925,7 +930,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 			lstr_t text = lt_json_find_child(opened_chest_reward, CLSTR("text"))->str_val;
 			if (lstate != RETRO_CHEST_REWARD) {
 				add_chat_msg(asprintf(arena, "Found %S", text), CHAT_NPC_CLR);
-				send_key(" ");
+				send_key("Space");
 			}
 			retro_state = RETRO_CHEST_REWARD;
 			can_move = 0;
@@ -936,7 +941,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 			lstr_t switch_section_text = lt_json_find_child(bank_section, CLSTR("text"))->str_val;
 			lt_printf("%S\n", switch_section_text);
 			if (cmd == CMD_BANK_CLOSE) {
-				send_key(" ");
+				send_key("Space");
 				cmd = 0;
 			}
 			retro_state = RETRO_BANK;
@@ -997,14 +1002,14 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 // 		if (lstate != retro_state) {
 // 			if (retro_state == RETRO_WORLD || retro_state == RETRO_STATS)
-// 				send_key("c");
+// 				send_key("KeyC");
 // 			else if (retro_state == RETRO_INVENTORY)
-// 				send_key("x");
+// 				send_key("KeyX");
 // 			else if (retro_state == RETRO_SPELLBOOK)
-// 				send_key("z");
+// 				send_key("KeyZ");
 // 		}
 
-// 		lt_json_print(lt_stdout, it->next);
+		lt_json_print(lt_stdout, it->next);
 
 		static int last_pageid = -1;
 		static b8 awaiting_pageswitch = 0;
@@ -1181,6 +1186,8 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				lt_json_t* opened_at = lt_json_find_child(piece_it, CLSTR("openedAt"));
 				if (opened_at->stype != LT_JSON_NULL)
 					chests[chest_index].opened_at = lt_json_int_val(opened_at);
+				else
+					chests[chest_index].opened_at = -1;
 			}
 			else if (lt_lstr_startswith(piece_it->key, CLSTR("NPC|"))) {
 				usz pfx_len = CLSTR("NPC|").len;
@@ -1710,34 +1717,7 @@ int main(int argc, char** argv) {
 
 		for (usz i = 0; i < ev_count; ++i) {
 			lt_window_event_t ev = evs[i];
-
-			switch (ev.type) {
-			case LT_WIN_EVENT_KEY_PRESS:
-				if (ev.key == LT_KEY_W) {
-					w_pressed_msec = time_msec;
-					goto press_common;
-				}
-				else if (ev.key == LT_KEY_A) {
-					a_pressed_msec = time_msec;
-					goto press_common;
-				}
-				else if (ev.key == LT_KEY_S) {
-					s_pressed_msec = time_msec;
-					goto press_common;
-				}
-				else if (ev.key == LT_KEY_D) {
-					d_pressed_msec = time_msec;
-					goto press_common;
-				}
-				break;
-			press_common:
-				if (popup_open) {
-					popup_open = 0;
-					send_key(" ");
-				}
-				break;
-
-			case LT_WIN_EVENT_KEY_RELEASE:
+			if (ev.type == LT_WIN_EVENT_KEY_RELEASE) {
 				if (ev.key == LT_KEY_W)
 					w_pressed_msec = -1;
 				else if (ev.key == LT_KEY_A)
@@ -1746,15 +1726,27 @@ int main(int argc, char** argv) {
 					s_pressed_msec = -1;
 				else if (ev.key == LT_KEY_D)
 					d_pressed_msec = -1;
-				break;
+			}
+			else if (ev.type == LT_WIN_EVENT_KEY_PRESS) {
+				if (ev.key == LT_KEY_W)
+					w_pressed_msec = time_msec;
+				else if (ev.key == LT_KEY_A)
+					a_pressed_msec = time_msec;
+				else if (ev.key == LT_KEY_S)
+					s_pressed_msec = time_msec;
+				else if (ev.key == LT_KEY_D)
+					d_pressed_msec = time_msec;
+				else
+					continue;
 
-			default:
-				break;
+				if (popup_open && !textbox_selected) {
+					popup_open = 0;
+					send_key("Space");
+				}
 			}
 		}
 
-		if (tilemap && local_player && can_move) {
-
+		if (tilemap && local_player && can_move && !textbox_selected) {
 			static u64 walk_start_msec = 0;
 
 			i8 move_dir = -1;
@@ -1781,13 +1773,13 @@ int main(int argc, char** argv) {
 			u64 walk_time_delta = time_msec - walk_start_msec;
 
 			static u64 mkeyup_delay = 0;
-			#define WALK_KEYUP_DELAY (MOVESPEED)
+#define WALK_KEYUP_DELAY (MOVESPEED)
 
 			if (mkeyup_delay && walk_time_delta > mkeyup_delay) {
-				send_key_up("w");
-				send_key_up("a");
-				send_key_up("s");
-				send_key_up("d");
+				send_key_up("KeyW");
+				send_key_up("KeyA");
+				send_key_up("KeyS");
+				send_key_up("KeyD");
 				mkeyup_delay = 0;
 			}
 
@@ -1805,7 +1797,7 @@ int main(int argc, char** argv) {
 
 					switch (move_dir) {
 					case DIR_UP:
-						send_key_down("w");
+						send_key_down("KeyW");
 						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x, predict_y - 1)) {
 							--predict_y;
@@ -1815,7 +1807,7 @@ int main(int argc, char** argv) {
 						}
 						break;
 					case DIR_LEFT:
-						send_key_down("a");
+						send_key_down("KeyA");
 						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x - 1, predict_y)) {
 							--predict_x;
@@ -1825,7 +1817,7 @@ int main(int argc, char** argv) {
 						}
 						break;
 					case DIR_DOWN:
-						send_key_down("s");
+						send_key_down("KeyS");
 						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x, predict_y + 1)) {
 							++predict_y;
@@ -1835,7 +1827,7 @@ int main(int argc, char** argv) {
 						}
 						break;
 					case DIR_RIGHT:
-						send_key_down("d");
+						send_key_down("KeyD");
 						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x + 1, predict_y)) {
 							++predict_x;
@@ -1855,7 +1847,7 @@ int main(int argc, char** argv) {
 
 		lt_gui_panel_begin(cx, 0, 0, 0);
 
-		lt_gui_row(cx, 5);
+		lt_gui_row(cx, 6);
 		if (lt_gui_dropdown_begin(cx, CLSTR("Character"), 97, character_count * 18, &charlist_state, 0)) {
 			for (usz i = 0; i < character_count; ++i) {
 				if (lt_gui_button(cx, characters[i].description, LT_GUI_ALIGN_RIGHT | LT_GUI_BORDER_OUTSET | LT_GUI_GROW_X))
@@ -1863,6 +1855,9 @@ int main(int argc, char** argv) {
 			}
 			lt_gui_dropdown_end(cx);
 		}
+
+		if (lt_gui_button(cx, CLSTR("Create"), 0))
+			cmd = CMD_CREATE_CHAR;
 
 		lt_gui_hspace(cx, 4, 0);
 		lt_gui_label(cx, local_player ? local_player->username : NLSTR(), 0);
@@ -1902,10 +1897,7 @@ int main(int argc, char** argv) {
 		cx->style->text_clr = text_clr;
 		lt_gui_panel_end(cx);
 
-		static char tb_buf[CHATMSG_MAXLEN] = {""};
-		static lt_gui_textbox_state_t tb_state = { tb_buf, CHATMSG_MAXLEN, 0 };
-
-		if (lt_gui_textbox(cx, 0, 0, &tb_state, LT_GUI_BORDER_INSET)) {
+		if ((textbox_selected = lt_gui_textbox(cx, 0, 0, &tb_state, LT_GUI_BORDER_INSET))) {
 			for (usz i = 0; i < ev_count; ++i) {
 				lt_window_event_t ev = evs[i];
 				if (ev.type == LT_WIN_EVENT_KEY_PRESS) {
@@ -1923,6 +1915,10 @@ int main(int argc, char** argv) {
 					}
 				}
 			}
+		}
+
+		if (lt_window_key_pressed(win, LT_KEY_ENTER)) {
+			tb_state.selected = !tb_state.selected;
 		}
 
 		lt_gui_panel_end(cx);
@@ -2065,7 +2061,7 @@ int main(int argc, char** argv) {
 				if (is_local && interaction_str.len) {
 					text = asprintf(arena, "(E) %S", interaction_str);
 					if (lt_window_key_pressed(win, LT_KEY_E))
-						send_key(" ");
+						send_key("Space");
 				}
 
 				float name_w = font->width * text.len;
