@@ -3,13 +3,31 @@
 
 #include <lt/fwd.h>
 #include <lt/lt.h>
+#include <lt/linalg.h>
+
+typedef
+struct mesh {
+	lt_vec3_t* verts;
+	lt_vec2_t* uvs;
+	lt_vec4_t* clrs;
+	u32 vert_count;
+
+	u32 bufs[3];
+	u32 vao;
+} mesh_t;
 
 void render_init(void);
 
 void render_begin(lt_window_t* win);
 void render_end(lt_window_t* win);
 
+void render_upload_mesh(mesh_t* mesh);
+void render_free_mesh(mesh_t* mesh);
+void render_mesh(mesh_t* mesh, int tex);
+
 #define TEXTURE_FILTER 1
+
+extern int no_tex;
 
 void render_create_tex(int w, int h, void* data, int* id, u32 flag);
 

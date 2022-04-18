@@ -6,6 +6,13 @@ OBJS = \
 	src/render.o \
 	src/websock.o \
 	src/stb_image.o \
+	src/npc.o \
+	src/chest.o \
+	src/bank.o \
+	src/map.o \
+	src/cosmetic.o \
+	src/send.o \
+	src/chat.o \
 	src/resource.o
 
 DEPS = $(patsubst %.o,%.deps,$(OBJS))
@@ -28,10 +35,11 @@ endif
 ifdef WINDOWS
 	CC = x86_64-w64-mingw32-gcc
 	LNK = x86_64-w64-mingw32-gcc
-	LNK_LIBS += -lgdi32 -lws2_32
+	LNK_LIBS += -lgdi32 -lws2_32 -lopengl32
+	LNK_FLAGS += -static
 else
 	LNK_FLAGS += -rdynamic
-	LNK_LIBS += -lpthread -ldl -lm -lGL
+	LNK_LIBS += -lpthread -ldl -lm
 endif
 
 LT_PATH = lt/bin/lt.a
