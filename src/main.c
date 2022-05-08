@@ -69,6 +69,7 @@ struct player {
 	clothes_dye_t* clothes_dye;
 	hair_dye_t* hair_dye;
 
+	u8 step_anim_offs;
 	u64 walk_start;
 } player_t;
 
@@ -512,7 +513,7 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 					player->outfit = NULL;
 
 				lt_json_t* wstart_js = lt_json_find_child(piece_it, CLSTR("sinceWalkAnimationStarted"));
-				if (wstart_js->stype != LT_JSON_NULL) {
+				if (wstart_js->stype != LT_JSON_NULL && player != local_player) {
 					if (time_msec - player->walk_start > MOVESPEED - delta_avg_msec)
 						player->walk_start = time_msec - lt_json_int_val(wstart_js);
 				}
@@ -725,12 +726,12 @@ void draw_sprite_uv(lt_vec2_t pos, lt_vec2_t size, lt_vec2_t uv1, lt_vec2_t uv2,
 	float x2 = x1 + size[0], y2 = y1 + size[1];
 
 	lt_vec3_t verts[6] = {
-		{x1, y1, 0.0f},
-		{x2, y1, 0.0f},
-		{x2, y2, 0.0f},
-		{x1, y1, 0.0f},
-		{x2, y2, 0.0f},
-		{x1, y2, 0.0f},
+		{x1, y1, 0.1f},
+		{x2, y1, 0.1f},
+		{x2, y2, 0.1f},
+		{x1, y1, 0.1f},
+		{x2, y2, 0.1f},
+		{x1, y2, 0.1f},
 	};
 	lt_vec4_t clrs[6] = {
 		{1.0f, 1.0f, 1.0f, 1.0f},
@@ -817,27 +818,7 @@ b8 collide_at(tilemap_t* tilemap, isz x, isz y) {
 	if (x < 0 || y < 0 || x >= tilemap->w || y >= tilemap->h)
 		return 1;
 
-	usz ii = x * tilemap->h + y;
-
-	u16 tile_index = tilemap->b_tile_indices[ii * 2];
-	u16 tile_count = tilemap->b_tile_indices[ii * 2 + 1];
-
-	for (usz ti = 0; ti < tile_count; ++ti) {
-		u16 tile = tilemap->tiles[tile_index + ti];
-		tileset_t* tileset = tilemap_lookup_index(tilemap, &tile);
-		LT_ASSERT(tileset);
-		if (tileset->collisions[tile])
-			return 1;
-	}
-
-	if (tilemap->npc_indices[ii] != -1)
-		return 1;
-	if (tilemap->chest_indices[ii] != -1)
-		return 1;
-	if (tilemap->bank_indices[ii] != -1)
-		return 1;
-
-	return 0;
+	return tilemap->collision[y * tilemap->w + x];
 }
 
 void parse_data_defs(void) {
@@ -1103,6 +1084,9 @@ int main(int argc, char** argv) {
 		static i64 s_pressed_msec = -1;
 		static i64 d_pressed_msec = -1;
 
+		static u64 walk_start_msec = 0;
+		static u8 step_anim_offs = 0;
+
 		for (usz i = 0; i < ev_count; ++i) {
 			lt_window_event_t ev = evs[i];
 			if (ev.type == LT_WIN_EVENT_KEY_RELEASE) {
@@ -1135,8 +1119,6 @@ int main(int argc, char** argv) {
 		}
 
 		if (tilemap && local_player && can_move && !textbox_selected) {
-			static u64 walk_start_msec = 0;
-
 			i8 move_dir = -1;
 			u64 move_pressed_msec = 0;
 			if (w_pressed_msec != -1) {
@@ -1155,8 +1137,6 @@ int main(int argc, char** argv) {
 				move_dir = DIR_RIGHT;
 				move_pressed_msec = d_pressed_msec;
 			}
-
-			static u64 walk_anim_start_msec = 0;
 
 			u64 walk_time_delta = time_msec - walk_start_msec;
 
@@ -1189,9 +1169,7 @@ int main(int argc, char** argv) {
 						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x, predict_y - 1)) {
 							--predict_y;
-							walk_anim_start_msec = time_msec;
-							walk_start_msec = time_msec;
-							mkeyup_delay = WALK_KEYUP_DELAY;
+							goto nocollide_common;
 						}
 						break;
 					case DIR_LEFT:
@@ -1199,9 +1177,7 @@ int main(int argc, char** argv) {
 						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x - 1, predict_y)) {
 							--predict_x;
-							walk_anim_start_msec = time_msec;
-							walk_start_msec = time_msec;
-							mkeyup_delay = WALK_KEYUP_DELAY;
+							goto nocollide_common;
 						}
 						break;
 					case DIR_DOWN:
@@ -1209,9 +1185,7 @@ int main(int argc, char** argv) {
 						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x, predict_y + 1)) {
 							++predict_y;
-							walk_anim_start_msec = time_msec;
-							walk_start_msec = time_msec;
-							mkeyup_delay = WALK_KEYUP_DELAY;
+							goto nocollide_common;
 						}
 						break;
 					case DIR_RIGHT:
@@ -1219,21 +1193,25 @@ int main(int argc, char** argv) {
 						mkeyup_delay = 50;
 						if (!collide_at(tilemap, predict_x + 1, predict_y)) {
 							++predict_x;
-							walk_anim_start_msec = time_msec;
-							walk_start_msec = time_msec;
-							mkeyup_delay = WALK_KEYUP_DELAY;
+							goto nocollide_common;
 						}
+						break;
+
+					nocollide_common:
+						walk_start_msec = time_msec;
+						mkeyup_delay = WALK_KEYUP_DELAY;
+						step_anim_offs = !step_anim_offs << 1;
 						break;
 					}
 				}
 			}
 
-			predict_step_len = 1.0f - ((float)(time_msec - walk_anim_start_msec) / MOVESPEED);
+			predict_step_len = 1.0f - ((float)(time_msec - walk_start_msec) / MOVESPEED);
 		}
 
 		lt_gui_begin(cx, 0, 0, width, height);
 
-		lt_gui_panel_begin(cx, 0, 0, 0);
+		lt_gui_panel_begin(cx, 0, 24, 0);
 
 		lt_gui_row(cx, 6);
 		if (lt_gui_dropdown_begin(cx, CLSTR("Character"), 97, character_count * 18, &charlist_state, 0)) {
@@ -1255,10 +1233,15 @@ int main(int argc, char** argv) {
 		if (lt_gui_button(cx, CLSTR("Settings"), LT_GUI_ALIGN_RIGHT | LT_GUI_BORDER_OUTSET))
 			;
 
+		lt_gui_panel_end(cx);
+
 		lt_gui_row(cx, 2);
+		u32 panel_bg = cx->style->panel_bg_clr;
+		cx->style->panel_bg_clr = 0x00FFFFFF;
 		lt_gui_panel_begin(cx, -SIDEBAR_W, 0, LT_GUI_BORDER_INSET);
 		lt_gui_rect_t game_area = lt_gui_get_container(cx)->a;
 		lt_gui_panel_end(cx);
+		cx->style->panel_bg_clr = panel_bg;
 
 		lt_gui_panel_begin(cx, 0, 0, LT_GUI_BORDER_INSET);
 		if (lt_gui_expandable(cx, CLSTR("Players"), &playerlist_state, LT_GUI_BORDER_OUTSET)) {
@@ -1302,8 +1285,6 @@ int main(int argc, char** argv) {
 
 		lt_gui_panel_end(cx);
 
-		lt_gui_panel_end(cx);
-
 		lt_gui_end(cx);
 
 		render_scissor(NULL, &game_area);
@@ -1323,49 +1304,55 @@ int main(int argc, char** argv) {
 				}
 			}
 
-			for (usz x = 0; x < tilemap->w; ++x) {
-				for (usz y = 0; y < tilemap->h; ++y) {
-					usz ii = x * tilemap->h + y;
-					u16 tile_index = tilemap->b_tile_indices[ii * 2];
-					u16 tile_count = tilemap->b_tile_indices[ii * 2 + 1];
+// 			for (usz x = 0; x < tilemap->w; ++x) {
+// 				for (usz y = 0; y < tilemap->h; ++y) {
+// 					usz ii = x * tilemap->h + y;
+// 					u16 tile_index = tilemap->b_tile_indices[ii * 2];
+// 					u16 tile_count = tilemap->b_tile_indices[ii * 2 + 1];
 
-					float scr_x = scr_tileoffs_x + x * scr_tilew;
-					float scr_y = scr_tileoffs_y + y * scr_tilew;
+// 					float scr_x = scr_tileoffs_x + x * scr_tilew;
+// 					float scr_y = scr_tileoffs_y + y * scr_tilew;
 
-					for (usz ti = 0; ti < tile_count; ++ti) {
-						u16 tile = tilemap->tiles[tile_index + ti];
-						draw_tile(tilemap, scr_x, scr_y, scr_tilew, tile);
-					}
+// 					for (usz ti = 0; ti < tile_count; ++ti) {
+// 						u16 tile = tilemap->tiles[tile_index + ti];
+// 						draw_tile(tilemap, scr_x, scr_y, scr_tilew, tile);
+// 					}
 
-					i16 chest_index = tilemap->chest_indices[ii];
-					if (chest_index >= 0) {
-						tileset_t* ts = tilemap_lookup_index(tilemap, &chest_index);
-						chest_t* chest = &chests[ts->chests[chest_index]];
+// 					i16 chest_index = tilemap->chest_indices[ii];
+// 					if (chest_index >= 0) {
+// 						tileset_t* ts = tilemap_lookup_index(tilemap, &chest_index);
+// 						chest_t* chest = &chests[ts->chests[chest_index]];
 
-						float uv_x = 0.0f;
-						if (chest->opened_at != -1)
-							uv_x += 0.75f;
-						draw_sprite_uv(LT_VEC2(scr_x, scr_y), LT_VEC2(scr_tilew, scr_tilew), LT_VEC2(uv_x, 0.0f), LT_VEC2(uv_x + 0.25f, 1.0f), chest->texture);
-					}
+// 						float uv_x = 0.0f;
+// 						if (chest->opened_at != -1)
+// 							uv_x += 0.75f;
+// 						draw_sprite_uv(LT_VEC2(scr_x, scr_y), LT_VEC2(scr_tilew, scr_tilew), LT_VEC2(uv_x, 0.0f), LT_VEC2(uv_x + 0.25f, 1.0f), chest->texture);
+// 					}
 
-					i16 bank_index = tilemap->bank_indices[ii];
-					if (bank_index >= 0) {
-						tileset_t* ts = tilemap_lookup_index(tilemap, &bank_index);
-						bank_t* bank = &banks[ts->banks[bank_index]];
+// 					i16 bank_index = tilemap->bank_indices[ii];
+// 					if (bank_index >= 0) {
+// 						tileset_t* ts = tilemap_lookup_index(tilemap, &bank_index);
+// 						bank_t* bank = &banks[ts->banks[bank_index]];
 
-						draw_sprite_uv(LT_VEC2(scr_x, scr_y), LT_VEC2(scr_tilew, scr_tilew), LT_VEC2(0.0f, 0.0f), LT_VEC2(0.25f, 1.0f), bank->texture);
-					}
+// 						draw_sprite_uv(LT_VEC2(scr_x, scr_y), LT_VEC2(scr_tilew, scr_tilew), LT_VEC2(0.0f, 0.0f), LT_VEC2(0.25f, 1.0f), bank->texture);
+// 					}
 
-					i16 npc_index = tilemap->npc_indices[ii];
-					if (npc_index >= 0) {
-						tileset_t* ts = tilemap_lookup_index(tilemap, &npc_index);
-						npc_t* npc = &npcs[ts->npcs[npc_index]];
+// 					i16 npc_index = tilemap->npc_indices[ii];
+// 					if (npc_index >= 0) {
+// 						tileset_t* ts = tilemap_lookup_index(tilemap, &npc_index);
+// 						npc_t* npc = &npcs[ts->npcs[npc_index]];
 
-						draw_npc(scr_x, scr_y, scr_tilew, npc->texture, npc->direction);
-						draw_sprite(scr_x, scr_y - scr_tilew, scr_tilew, scr_tilew, npc->indicator_texture);
-					}
-				}
-			}
+// 						draw_npc(scr_x, scr_y, scr_tilew, npc->texture, npc->direction);
+// 						draw_sprite(scr_x, scr_y - scr_tilew, scr_tilew, scr_tilew, npc->indicator_texture);
+// 					}
+// 				}
+// 			}
+
+
+ 			render_model_offs(scr_tileoffs_x, scr_tileoffs_y);
+			for (usz i = 0; i < tilemap->tileset_count; ++i)
+				render_mesh(&tilemap->meshes[i], tilemap->tilesets[i]->texture);
+			render_model_offs(0, 0);
 
 			lt_gui_point_t* pname_pts = lt_arena_reserve(arena, player_count * sizeof(lt_gui_point_t));
 			lstr_t* pname_strs = lt_arena_reserve(arena, player_count * sizeof(lstr_t));
@@ -1379,11 +1366,13 @@ int main(int argc, char** argv) {
 				if (players[i].tilemap != tilemap)
 					continue;
 
-				float step_len = 1.0f - ((float)(time_msec - players[i].walk_start) / MOVESPEED);
+				u64 walk_anim_start = players[i].walk_start;
+				float step_len = 1.0f - ((float)(time_msec - walk_anim_start) / MOVESPEED);
 
 				isz x = players[i].x;
 				isz y = players[i].y;
 				u8 dir = players[i].direction;
+				u8 step_offs = 0;
 
 				b8 is_local = &players[i] == local_player;
 
@@ -1391,6 +1380,8 @@ int main(int argc, char** argv) {
 					dir = predict_move_dir;
 					x = predict_x;
 					y = predict_y;
+					walk_anim_start = walk_start_msec;
+					step_offs = step_anim_offs;
 
 					step_len = predict_step_len;
 				}
@@ -1398,7 +1389,7 @@ int main(int argc, char** argv) {
 				float scr_x = scr_tileoffs_x + x * scr_tilew;
 				float scr_y = scr_tileoffs_y + y * scr_tilew;
 
-				usz animation_frame = 0;
+				usz animation_frame = step_offs;
 
 				if (step_len > 0.0f) {
 					switch (dir) {
@@ -1407,7 +1398,9 @@ int main(int argc, char** argv) {
 					case DIR_LEFT: scr_x += step_len * scr_tilew; break;
 					case DIR_RIGHT: scr_x -= step_len * scr_tilew; break;
 					}
-					animation_frame = ((lt_hfreq_time_msec() / 167) % 4);
+
+					if (step_len < 1.0f)
+						animation_frame += step_len * 2;
 				}
 
 				outfit_t* outfit = players[i].outfit;
@@ -1441,21 +1434,21 @@ int main(int argc, char** argv) {
 					++pname_count;
 			}
 
-			for (usz y = 0; y < tilemap->h; ++y) {
-				for (usz x = 0; x < tilemap->w; ++x) {
-					usz ii = x * tilemap->h + y;
-					u16 tile_index = tilemap->a_tile_indices[ii * 2];
-					u16 tile_count = tilemap->a_tile_indices[ii * 2 + 1];
+// 			for (usz y = 0; y < tilemap->h; ++y) {
+// 				for (usz x = 0; x < tilemap->w; ++x) {
+// 					usz ii = x * tilemap->h + y;
+// 					u16 tile_index = tilemap->a_tile_indices[ii * 2];
+// 					u16 tile_count = tilemap->a_tile_indices[ii * 2 + 1];
 
-					float scr_x = scr_tileoffs_x + x * scr_tilew;
-					float scr_y = scr_tileoffs_y + y * scr_tilew;
+// 					float scr_x = scr_tileoffs_x + x * scr_tilew;
+// 					float scr_y = scr_tileoffs_y + y * scr_tilew;
 
-					for (usz ti = 0; ti < tile_count; ++ti) {
-						u16 tile = tilemap->tiles[tile_index + ti];
-						draw_tile(tilemap, scr_x, scr_y, scr_tilew, tile);
-					}
-				}
-			}
+// 					for (usz ti = 0; ti < tile_count; ++ti) {
+// 						u16 tile = tilemap->tiles[tile_index + ti];
+// 						draw_tile(tilemap, scr_x, scr_y, scr_tilew, tile);
+// 					}
+// 				}
+// 			}
 
 			for (usz i = 0; i < pname_count; ++i) {
 				render_draw_rect(NULL, 1, &pname_bg_rects[i], &pname_bg_clrs[i]);

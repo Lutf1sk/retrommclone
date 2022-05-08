@@ -4,9 +4,11 @@
 #include <lt/lt.h>
 #include <lt/fwd.h>
 
+typedef struct mesh mesh_t;
+
 typedef
 struct tileset {
-	lstr_t name;
+	lstr_t slug;
 	b8* collisions;
 	i8* chests, *banks, *npcs;
 	u8* frame_counts;
@@ -30,17 +32,17 @@ tileset_t* tileset_add(lt_arena_t* arena, lt_json_t* json);
 
 typedef
 struct tilemap {
-	lstr_t name;
+	lstr_t slug;
+	u16 w, h;
 	tileset_t** tilesets;
-	u16* tileset_start_indices;
+	mesh_t* meshes;
+	b8* collision;
 	usz tileset_count;
-
-	usz w, h;
-	u16* tiles, *a_tile_indices, *b_tile_indices;
-	i16* chest_indices, *bank_indices, *npc_indices;
 } tilemap_t;
 
 #define MAX_TILEMAPS 16
+
+#define SCR_TILEW 32.0f
 
 extern tilemap_t tilemaps[MAX_TILEMAPS];
 extern char tilemap_names[MAX_TILEMAPS][32];

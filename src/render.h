@@ -21,6 +21,8 @@ void render_init(void);
 void render_begin(lt_window_t* win);
 void render_end(lt_window_t* win);
 
+void render_model_offs(float x, float y);
+
 void render_upload_mesh(mesh_t* mesh);
 void render_free_mesh(mesh_t* mesh);
 void render_mesh(mesh_t* mesh, int tex);

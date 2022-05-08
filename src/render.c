@@ -17,6 +17,12 @@ extern int glyph_bm;
 
 int no_tex;
 
+lt_mat4_t projection_mat;
+lt_mat4_t model_mat;
+int projection_id;
+int model_id;
+int tex_id;
+
 static u32 prog;
 
 static
@@ -29,10 +35,11 @@ void compile_shaders(void) {
 		"varying vec4 frag_clr;"
 		"varying vec2 frag_uv;"
 		"uniform mat4 projection;"
+		"uniform mat4 model;"
 		"void main() {"
 		"	frag_uv = uv;"
 		"	frag_clr = clr;"
-		"	gl_Position = projection * vec4(pos, 1.0f);"
+		"	gl_Position = projection * model * vec4(pos, 1.0f);"
 		"}";
 
 	const char* frag_src =
@@ -41,7 +48,12 @@ void compile_shaders(void) {
 		"varying vec2 frag_uv;"
 		"uniform sampler2D tex;"
 		"void main() {"
-		"	gl_FragColor = frag_clr * texture(tex, frag_uv);"
+		"	vec4 clr = frag_clr * texture(tex, frag_uv);"
+		"	if (clr.a < 0.5f)"
+		"		gl_FragDepth = 1.0f;"
+		"	else"
+		"		gl_FragDepth = gl_FragCoord.z;"
+		"	gl_FragColor = clr;"
 		"}";
 
 	u32	vert_shader = glCreateShader(GL_VERTEX_SHADER),
@@ -97,10 +109,16 @@ void render_init(void) {
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glDisable(GL_CULL_FACE);
-	glDisable(GL_DEPTH_TEST);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LEQUAL);
 	glEnable(GL_SCISSOR_TEST);
 
 	compile_shaders();
+	tex_id = glGetUniformLocation(prog, "tex");
+	glUniform1i(tex_id, 0);
+
+	projection_id = glGetUniformLocation(prog, "projection");
+	model_id = glGetUniformLocation(prog, "model");
 
 	render_create_tex(1, 1, (u32[]){0xFFFFFFFF}, &no_tex, 0);
 }
@@ -113,13 +131,11 @@ void render_begin(lt_window_t* win) {
 
 	glViewport(0, 0, width, height);
 
-	lt_mat4_t projection_mat;
 	lt_mat4_ortho(projection_mat, 0.0f, width, height, 0.0f, -1.0f, 1.0f);
-	int projection_id = glGetUniformLocation(prog, "projection");
 	glUniformMatrix4fv(projection_id, 1, GL_FALSE, projection_mat[0]);
+	lt_mat4_identity(model_mat);
+	glUniformMatrix4fv(model_id, 1, GL_FALSE, model_mat[0]);
 
-	int tex_id = glGetUniformLocation(prog, "tex");
-	glUniform1i(tex_id, 0);
 // 	printf("(%f, %f, %f, %f)\n", projection_mat[0][0], projection_mat[0][1], projection_mat[0][2], projection_mat[0][3]);
 // 	printf("(%f, %f, %f, %f)\n", projection_mat[1][0], projection_mat[1][1], projection_mat[1][2], projection_mat[1][3]);
 // 	printf("(%f, %f, %f, %f)\n", projection_mat[2][0], projection_mat[2][1], projection_mat[2][2], projection_mat[2][3]);
@@ -135,6 +151,12 @@ void render_begin(lt_window_t* win) {
 void render_end(lt_window_t* win) {
 	lt_window_gl_swap_buffers(win);
 	glFinish();
+}
+
+void render_model_offs(float x, float y) {
+	model_mat[3][0] = x;
+	model_mat[3][1] = y;
+	glUniformMatrix4fv(model_id, 1, GL_FALSE, model_mat[0]);
 }
 
 void render_upload_mesh(mesh_t* mesh) {
