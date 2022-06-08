@@ -11,6 +11,7 @@
 #include <lt/utf8.h>
 #include <lt/ctype.h>
 #include <lt/gl.h>
+#include <lt/time.h>
 
 #include "websock.h"
 #include "net_helpers.h"
@@ -126,6 +127,18 @@ void send_pong(lt_socket_t* sock) {
 	ws_send_text(sock, CLSTR("3"));
 }
 
+u64 srvtime_start = 0;
+u64 time_start = 0;
+i64 time_offs = 0;
+
+u64 time_current(void) {
+	return time_offs + lt_hfreq_time_msec();
+}
+
+u64 time_from_srvtime(u64 t) {
+	return ((i64)t - time_offs);
+}
+
 lt_mutex_t* state_lock;
 
 player_t* find_player_from_slug(lstr_t slug) {
@@ -219,7 +232,6 @@ void switch_char(u8 charid) {
 	LT_ASSERT(charid < character_count);
 }
 
-#include <lt/time.h>
 #include <stdlib.h>
 #include <math.h>
 
@@ -250,6 +262,14 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 
 		lt_mutex_lock(state_lock);
 		send_begin();
+
+		static b8 first_update = 1;
+		if (first_update) {
+			srvtime_start = lt_json_uint_val(lt_json_find_child(it->next, CLSTR("currentTime")));
+			time_start = time_msec;
+			time_offs = srvtime_start - time_start;
+			first_update = 0;
+		}
 
 		lstr_t local_player_slug = lt_json_find_child(it->next, CLSTR("playerSlug"))->str_val;
 
@@ -512,13 +532,11 @@ void on_msg(lt_arena_t* arena, lt_socket_t* sock, lt_json_t* it) {
 				else
 					player->outfit = NULL;
 
-				lt_json_t* wstart_js = lt_json_find_child(piece_it, CLSTR("sinceWalkAnimationStarted"));
-				if (wstart_js->stype != LT_JSON_NULL && player != local_player) {
-					if (time_msec - player->walk_start > MOVESPEED - delta_avg_msec)
-						player->walk_start = time_msec - lt_json_int_val(wstart_js);
-				}
+				lt_json_t* wstart_js = lt_json_find_child(piece_it, CLSTR("walkAnimationStartedAt"));
+				if (wstart_js->stype != LT_JSON_NULL && player != local_player)
+					player->walk_start = time_from_srvtime(lt_json_int_val(wstart_js));
 				else
-					player->walk_start = time_msec - MOVESPEED*2;
+					player->walk_start = time_current() - MOVESPEED*2;
 			}
 			else if (cmd == CMD_GET_CHARS && lt_lstr_startswith(piece_it->key, CLSTR("Label|character-select/character/"))) {
 				usz pfx_len = CLSTR("Label|character-select/character/").len;
